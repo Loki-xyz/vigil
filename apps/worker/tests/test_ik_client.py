@@ -28,7 +28,7 @@ def _make_response(status_code: int, json_data: dict | None = None) -> httpx.Res
     resp = httpx.Response(
         status_code=status_code,
         json=json_data or {},
-        request=httpx.Request("GET", "https://test"),
+        request=httpx.Request("POST", "https://test"),
     )
     return resp
 
@@ -82,7 +82,7 @@ class TestSearch:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(200, ik_search_response_single)
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
 
         result = await client.search("Reliance doctypes:supremecourt")
 
@@ -96,13 +96,13 @@ class TestSearch:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(200, {"found": 0, "docs": []})
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
 
         await client.search("test query", page_num=2)
 
-        call_args = client._client.get.call_args
-        params = call_args.kwargs.get("params", {})
-        assert params.get("pagenum") == 2
+        call_args = client._client.post.call_args
+        data = call_args.kwargs.get("data", {})
+        assert data.get("pagenum") == 2
 
     async def test_search_with_watch_id(self, patch_supabase):
         """watch_id should be forwarded to _log_call."""
@@ -110,7 +110,7 @@ class TestSearch:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(200, {"found": 0, "docs": []})
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
         client._log_call = AsyncMock()
 
         await client.search("test", watch_id="watch-123")
@@ -135,12 +135,12 @@ class TestSearchErrors:
             base_url="https://api.indiankanoon.org", token="bad_tok"
         )
         mock_resp = _make_response(403)
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
 
         with pytest.raises(IKAPIAuthError):
             await client.search("test")
 
-        assert client._client.get.call_count == 1
+        assert client._client.post.call_count == 1
 
     async def test_search_429_raises_rate_limit_error(self, patch_supabase):
         """429 should raise IKAPIRateLimitError without retrying."""
@@ -148,12 +148,12 @@ class TestSearchErrors:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(429)
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
 
         with pytest.raises(IKAPIRateLimitError):
             await client.search("test")
 
-        assert client._client.get.call_count == 1
+        assert client._client.post.call_count == 1
 
     async def test_search_500_retries_then_succeeds(
         self, patch_supabase, ik_search_response_single
@@ -164,13 +164,13 @@ class TestSearchErrors:
         )
         resp_500 = _make_response(500)
         resp_200 = _make_response(200, ik_search_response_single)
-        client._client.get = AsyncMock(side_effect=[resp_500, resp_200])
+        client._client.post = AsyncMock(side_effect=[resp_500, resp_200])
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await client.search("test")
 
         assert isinstance(result, dict)
-        assert client._client.get.call_count == 2
+        assert client._client.post.call_count == 2
 
     async def test_search_500_retries_exhausted(self, patch_supabase):
         """All 500s should exhaust retries then raise IKAPIError."""
@@ -180,13 +180,13 @@ class TestSearchErrors:
             max_retries=3,
         )
         resp_500 = _make_response(500)
-        client._client.get = AsyncMock(return_value=resp_500)
+        client._client.post = AsyncMock(return_value=resp_500)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(IKAPIError):
                 await client.search("test")
 
-        assert client._client.get.call_count == 4  # 1 initial + 3 retries
+        assert client._client.post.call_count == 4  # 1 initial + 3 retries
 
     async def test_search_timeout_retries(self, patch_supabase):
         """Timeout on first call, success on second — should succeed."""
@@ -194,7 +194,7 @@ class TestSearchErrors:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         resp_200 = _make_response(200, {"found": 0, "docs": []})
-        client._client.get = AsyncMock(
+        client._client.post = AsyncMock(
             side_effect=[httpx.TimeoutException("timeout"), resp_200]
         )
 
@@ -202,7 +202,7 @@ class TestSearchErrors:
             result = await client.search("test")
 
         assert isinstance(result, dict)
-        assert client._client.get.call_count == 2
+        assert client._client.post.call_count == 2
 
     async def test_search_timeout_exhausted(self, patch_supabase):
         """All timeouts should exhaust retries then raise IKAPITimeoutError."""
@@ -211,7 +211,7 @@ class TestSearchErrors:
             token="tok_abc",
             max_retries=3,
         )
-        client._client.get = AsyncMock(
+        client._client.post = AsyncMock(
             side_effect=httpx.TimeoutException("timeout")
         )
 
@@ -219,7 +219,7 @@ class TestSearchErrors:
             with pytest.raises(IKAPITimeoutError):
                 await client.search("test")
 
-        assert client._client.get.call_count == 4
+        assert client._client.post.call_count == 4
 
     async def test_search_exponential_backoff(self, patch_supabase):
         """Retry backoff should follow 2s, 4s, 8s pattern."""
@@ -228,7 +228,7 @@ class TestSearchErrors:
             token="tok_abc",
             max_retries=3,
         )
-        client._client.get = AsyncMock(return_value=_make_response(500))
+        client._client.post = AsyncMock(return_value=_make_response(500))
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             with pytest.raises(IKAPIError):
@@ -302,7 +302,7 @@ class TestGetDocMeta:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(200, ik_docmeta_response)
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
 
         result = await client.get_doc_meta(12345678)
 
@@ -315,7 +315,7 @@ class TestGetDocMeta:
         client = IKClient(
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
-        client._client.get = AsyncMock(return_value=_make_response(404))
+        client._client.post = AsyncMock(return_value=_make_response(404))
 
         with pytest.raises(IKAPIError):
             await client.get_doc_meta(99999999)
@@ -326,7 +326,7 @@ class TestGetDocMeta:
             base_url="https://api.indiankanoon.org", token="tok_abc"
         )
         mock_resp = _make_response(200, {"tid": 123})
-        client._client.get = AsyncMock(return_value=mock_resp)
+        client._client.post = AsyncMock(return_value=mock_resp)
         client._log_call = AsyncMock()
 
         await client.get_doc_meta(123)
@@ -409,16 +409,16 @@ class TestJSONParseError:
         resp = httpx.Response(
             status_code=200,
             content=b"<html>Not JSON</html>",
-            request=httpx.Request("GET", "https://test"),
+            request=httpx.Request("POST", "https://test"),
             headers={"content-type": "text/html"},
         )
-        client._client.get = AsyncMock(return_value=resp)
+        client._client.post = AsyncMock(return_value=resp)
 
         with pytest.raises(IKAPIError, match="Malformed JSON"):
             await client.search("test")
 
         # Should NOT retry — it's a 2xx, just bad content
-        assert client._client.get.call_count == 1
+        assert client._client.post.call_count == 1
 
     async def test_malformed_json_logs_api_call(self, patch_supabase):
         """JSON parse failure should be logged via _log_call."""
@@ -428,10 +428,10 @@ class TestJSONParseError:
         resp = httpx.Response(
             status_code=200,
             content=b"not json at all",
-            request=httpx.Request("GET", "https://test"),
+            request=httpx.Request("POST", "https://test"),
             headers={"content-type": "text/plain"},
         )
-        client._client.get = AsyncMock(return_value=resp)
+        client._client.post = AsyncMock(return_value=resp)
         client._log_call = AsyncMock()
 
         with pytest.raises(IKAPIError):

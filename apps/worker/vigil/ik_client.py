@@ -98,6 +98,7 @@ class IKClient:
         url: str,
         params: dict | None = None,
         watch_id: str | None = None,
+        method: str = "POST",
     ) -> dict:
         """Make an HTTP request with retry logic, rate limiting, and logging."""
         await self._rate_limit()
@@ -106,7 +107,10 @@ class IKClient:
         for attempt in range(1 + self._max_retries):
             start = time.monotonic()
             try:
-                resp = await self._client.get(url, params=params)
+                if method == "POST":
+                    resp = await self._client.post(url, data=params)
+                else:
+                    resp = await self._client.get(url, params=params)
                 elapsed_ms = int((time.monotonic() - start) * 1000)
 
                 # 403 — auth error, never retry
@@ -169,7 +173,7 @@ class IKClient:
         self, form_input: str, page_num: int = 0, watch_id: str | None = None
     ) -> dict:
         """
-        GET /search/?formInput=<query>&pagenum=<page>
+        POST /search/ with formInput=<query>&pagenum=<page>
 
         Returns parsed JSON response with docs array.
         Retries on 5xx/timeout with exponential backoff (2s, 4s, 8s).
@@ -184,7 +188,7 @@ class IKClient:
 
     async def get_doc_meta(self, doc_id: int) -> dict:
         """
-        GET /docmeta/<doc_id>/
+        POST /docmeta/<doc_id>/
 
         Returns parsed JSON with bench composition, acts cited, AI tags.
         """

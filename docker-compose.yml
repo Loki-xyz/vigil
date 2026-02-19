@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  worker:
+    build: ./apps/worker
+    env_file: ./apps/worker/.env
+    restart: unless-stopped
+    depends_on:
+      - web
+
+  web:
+    build: ./apps/web
+    ports:
+      - "3000:3000"
+    env_file: ./apps/web/.env.local
+    restart: unless-stopped

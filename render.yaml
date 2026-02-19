@@ -1,0 +1,31 @@
+services:
+  - type: worker
+    name: vigil-worker
+    runtime: docker
+    region: singapore
+    plan: starter
+    dockerfilePath: ./apps/worker/Dockerfile
+    dockerContext: ./apps/worker
+    envVars:
+      - key: VIGIL_SUPABASE_URL
+        sync: false
+      - key: VIGIL_SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: VIGIL_IK_API_TOKEN
+        sync: false
+      - key: VIGIL_SMTP_HOST
+        sync: false
+      - key: VIGIL_SMTP_PORT
+        sync: false
+      - key: VIGIL_SMTP_USERNAME
+        sync: false
+      - key: VIGIL_SMTP_PASSWORD
+        sync: false
+      - key: VIGIL_SMTP_FROM_EMAIL
+        sync: false
+      - key: VIGIL_SLACK_WEBHOOK_URL
+        sync: false
+      - key: VIGIL_POLLING_ENABLED
+        value: "true"
+      - key: VIGIL_TIMEZONE
+        value: "Asia/Kolkata"

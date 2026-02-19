@@ -9,7 +9,14 @@ import {
   CardAction,
 } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { BarList } from "@tremor/react"
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  ResponsiveContainer,
+  Tooltip,
+} from "recharts"
 import { useTopWatches } from "@/lib/hooks/use-top-watches"
 
 export function TopWatches() {
@@ -44,7 +51,33 @@ export function TopWatches() {
             No matches yet.
           </p>
         ) : (
-          <BarList data={data} color="indigo" showAnimation />
+          <ResponsiveContainer width="100%" height={data.length * 40 + 20}>
+            <BarChart data={data} layout="vertical" margin={{ left: 0, right: 20 }}>
+              <XAxis type="number" hide />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={120}
+                tick={{ fontSize: 12, fill: "var(--color-muted-foreground, #888)" }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "var(--color-popover, #fff)",
+                  border: "1px solid var(--color-border, #e5e7eb)",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                }}
+              />
+              <Bar
+                dataKey="value"
+                fill="var(--color-indigo-500, #6366f1)"
+                radius={[0, 4, 4, 0]}
+                animationDuration={1000}
+              />
+            </BarChart>
+          </ResponsiveContainer>
         )}
       </CardContent>
     </Card>

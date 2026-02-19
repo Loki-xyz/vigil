@@ -66,14 +66,14 @@ export function PollNowButton({ watchId }: { watchId: string }) {
   return (
     <Button
       variant="outline"
-      size="xs"
+      size="sm"
       onClick={() => pollMutation.mutate()}
       disabled={isPolling || pollMutation.isPending}
     >
       {isPolling ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : (
-        <RefreshCw className="h-3 w-3" />
+        <RefreshCw className="h-4 w-4" />
       )}
       {isPolling ? "Polling..." : "Poll Now"}
     </Button>

@@ -50,11 +50,15 @@ export function MatchTrendChart() {
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "var(--color-popover, #fff)",
-                  border: "1px solid var(--color-border, #e5e7eb)",
+                  backgroundColor: "var(--color-popover)",
+                  border: "1px solid var(--color-border)",
                   borderRadius: "8px",
                   fontSize: "12px",
+                  color: "var(--color-popover-foreground)",
                 }}
+                itemStyle={{ color: "var(--color-popover-foreground)" }}
+                labelStyle={{ color: "var(--color-popover-foreground)" }}
+                formatter={(value: number | undefined) => [`${value ?? 0} matches`, null]}
               />
               <Area
                 type="monotone"

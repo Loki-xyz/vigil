@@ -313,3 +313,109 @@ class TestErrorHandling:
         data = upsert_call[0][0]
         assert data["headline"] is None
         assert data["doc_size"] is None
+
+
+# ---------------------------------------------------------------------------
+# _map_doc_to_judgment — sanitization (HTML stripping + date validation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSanitization:
+    """Tests for HTML stripping and date validation in _map_doc_to_judgment."""
+
+    # -- HTML stripping: title --
+
+    def test_title_html_tags_stripped(self):
+        doc = {"tid": 1, "title": "Department Of <b>Income</b> <b>Tax</b>", "docsource": "SC"}
+        result = _map_doc_to_judgment(doc)
+        assert result["title"] == "Department Of Income Tax"
+
+    def test_title_nested_tags_stripped(self):
+        doc = {"tid": 2, "title": "<em><b>Test</b></em> Judgment"}
+        result = _map_doc_to_judgment(doc)
+        assert result["title"] == "Test Judgment"
+
+    def test_title_no_html_unchanged(self):
+        doc = {"tid": 3, "title": "Clean Title vs Another Party"}
+        result = _map_doc_to_judgment(doc)
+        assert result["title"] == "Clean Title vs Another Party"
+
+    def test_title_none_preserved(self):
+        doc = {"tid": 4, "title": None}
+        result = _map_doc_to_judgment(doc)
+        assert result["title"] is None
+
+    def test_title_whitespace_normalized(self):
+        doc = {"tid": 5, "title": "A  <b>B</b>  C"}
+        result = _map_doc_to_judgment(doc)
+        assert result["title"] == "A B C"
+
+    # -- HTML stripping: court --
+
+    def test_court_html_tags_stripped(self):
+        doc = {"tid": 6, "docsource": "<b>Delhi</b> High Court"}
+        result = _map_doc_to_judgment(doc)
+        assert result["court"] == "Delhi High Court"
+
+    def test_court_none_preserved(self):
+        doc = {"tid": 7, "docsource": None}
+        result = _map_doc_to_judgment(doc)
+        assert result["court"] is None
+
+    # -- Headline NOT stripped --
+
+    def test_headline_html_preserved(self):
+        doc = {"tid": 8, "headline": "...cloud <b>Amazon</b> services..."}
+        result = _map_doc_to_judgment(doc)
+        assert "<b>Amazon</b>" in result["headline"]
+
+    # -- Date validation --
+
+    def test_valid_date_passes_through(self):
+        doc = {"tid": 10, "publishdate": "2024-03-15"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] == "2024-03-15"
+
+    def test_future_year_rejected(self):
+        doc = {"tid": 11, "publishdate": "3015-03-30"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_garbled_year_rejected(self):
+        doc = {"tid": 12, "publishdate": "6648-09-02"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_slightly_future_year_rejected(self):
+        doc = {"tid": 13, "publishdate": "2205-10-03"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_current_year_accepted(self):
+        from datetime import datetime
+
+        current_year = datetime.now().year
+        doc = {"tid": 14, "publishdate": f"{current_year}-01-15"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] == f"{current_year}-01-15"
+
+    def test_date_none_preserved(self):
+        doc = {"tid": 15, "publishdate": None}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_empty_string_date_rejected(self):
+        doc = {"tid": 16, "publishdate": ""}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_non_numeric_date_rejected(self):
+        doc = {"tid": 17, "publishdate": "not-a-date"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] is None
+
+    def test_old_date_accepted(self):
+        doc = {"tid": 18, "publishdate": "1950-01-26"}
+        result = _map_doc_to_judgment(doc)
+        assert result["judgment_date"] == "1950-01-26"

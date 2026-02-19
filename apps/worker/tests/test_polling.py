@@ -94,12 +94,11 @@ class TestPollSingleWatch:
         from_date_arg = mock_bq.call_args[0][3]
         assert from_date_arg == date(2026, 2, 15)
 
-    async def test_from_date_from_created_at_when_never_polled(
+    async def test_from_date_lookback_when_never_polled(
         self, patch_supabase, sample_watch_entity
     ):
-        """last_polled_at=None -> uses created_at as from_date."""
+        """last_polled_at=None -> uses now minus lookback days as from_date."""
         sample_watch_entity["last_polled_at"] = None
-        sample_watch_entity["created_at"] = "2026-02-10T08:00:00+00:00"
 
         mock_client = AsyncMock()
         mock_client.search.return_value = {"found": 0, "docs": []}
@@ -116,7 +115,8 @@ class TestPollSingleWatch:
             await poll_single_watch(sample_watch_entity)
 
         from_date_arg = mock_bq.call_args[0][3]
-        assert from_date_arg == date(2026, 2, 10)
+        expected = (datetime.now(timezone.utc) - timedelta(days=4)).date()
+        assert from_date_arg == expected
 
     async def test_general_error_returns_empty(
         self, patch_supabase, sample_watch_entity

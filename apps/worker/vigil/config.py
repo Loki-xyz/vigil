@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # Polling
     polling_enabled: bool = True
+    first_poll_lookback_days: int = 4
 
     # App
     timezone: str = "Asia/Kolkata"

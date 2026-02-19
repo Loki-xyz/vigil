@@ -1,18 +1,28 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import {
   useReactTable,
   getCoreRowModel,
+  getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   type SortingState,
+  type FilterFn,
 } from "@tanstack/react-table"
-import { Plus } from "lucide-react"
+import { Plus, Search } from "lucide-react"
 import { Header } from "@/components/layout/header"
 import { DataTable } from "@/components/ui/data-table"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Dialog,
   DialogContent,
@@ -25,7 +35,30 @@ import { WatchForm } from "@/components/watches/watch-form"
 import { useWatches, useCreateWatch } from "@/lib/hooks/use-watches"
 import { Skeleton } from "@/components/ui/skeleton"
 import { toast } from "sonner"
+import type { Watch } from "@/lib/supabase/types"
 import type { WatchFormValues } from "@/lib/validations/watch"
+
+const watchFilterFn: FilterFn<Watch> = (row, _columnId, filterValue) => {
+  const { search, type, status } = filterValue as {
+    search?: string
+    type?: string
+    status?: string
+  }
+
+  if (type && row.original.watch_type !== type) return false
+  if (status !== undefined) {
+    const isActive = status === "active"
+    if (row.original.is_active !== isActive) return false
+  }
+  if (search) {
+    const q = search.toLowerCase()
+    const name = (row.original.name ?? "").toLowerCase()
+    const terms = (row.original.query_terms ?? "").toLowerCase()
+    if (!name.includes(q) && !terms.includes(q)) return false
+  }
+
+  return true
+}
 
 export function WatchesContent() {
   const searchParams = useSearchParams()
@@ -37,17 +70,31 @@ export function WatchesContent() {
     }
   }, [searchParams])
   const [sorting, setSorting] = useState<SortingState>([])
+  const [searchQuery, setSearchQuery] = useState("")
+  const [typeFilter, setTypeFilter] = useState("")
+  const [statusFilter, setStatusFilter] = useState("")
   const { data: watches, isLoading } = useWatches()
   const createWatch = useCreateWatch()
+
+  const globalFilter = useMemo(
+    () => ({
+      search: searchQuery || undefined,
+      type: typeFilter || undefined,
+      status: statusFilter || undefined,
+    }),
+    [searchQuery, typeFilter, statusFilter]
+  )
 
   const table = useReactTable({
     data: watches ?? [],
     columns: watchColumns,
     getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     getSortedRowModel: getSortedRowModel(),
+    globalFilterFn: watchFilterFn,
     onSortingChange: setSorting,
-    state: { sorting },
+    state: { sorting, globalFilter },
   })
 
   const handleCreate = async (values: WatchFormValues) => {
@@ -68,6 +115,39 @@ export function WatchesContent() {
           </Button>
         }
       />
+
+      <div className="flex flex-wrap gap-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search watches..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <Select value={typeFilter} onValueChange={(v) => setTypeFilter(v.trim())}>
+          <SelectTrigger className="w-[160px]">
+            <SelectValue placeholder="All Types" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value=" ">All Types</SelectItem>
+            <SelectItem value="entity">Entity</SelectItem>
+            <SelectItem value="topic">Topic</SelectItem>
+            <SelectItem value="act">Act</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v.trim())}>
+          <SelectTrigger className="w-[160px]">
+            <SelectValue placeholder="All Statuses" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value=" ">All Statuses</SelectItem>
+            <SelectItem value="active">Active</SelectItem>
+            <SelectItem value="paused">Paused</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
 
       {isLoading ? (
         <div className="rounded-md border">

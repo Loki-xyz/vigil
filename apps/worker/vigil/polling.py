@@ -84,13 +84,14 @@ async def poll_single_watch(watch: dict) -> list[dict]:
     """Poll a single watch and return new matches."""
     try:
         last_polled_str = watch.get("last_polled_at")
-        created_str = watch.get("created_at")
-        from_dt_str = last_polled_str or created_str
 
-        if from_dt_str:
-            from_date = datetime.fromisoformat(from_dt_str).date()
+        if last_polled_str:
+            from_date = datetime.fromisoformat(last_polled_str).date()
         else:
-            from_date = datetime.now(timezone.utc).date()
+            # First poll: look back N days to catch recent judgments
+            from_date = (
+                datetime.now(timezone.utc) - timedelta(days=settings.first_poll_lookback_days)
+            ).date()
 
         query = build_query(
             watch["watch_type"],

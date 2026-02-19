@@ -64,14 +64,19 @@ export function TopWatches() {
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "var(--color-popover, #fff)",
-                  border: "1px solid var(--color-border, #e5e7eb)",
+                  backgroundColor: "var(--color-popover)",
+                  border: "1px solid var(--color-border)",
                   borderRadius: "8px",
                   fontSize: "12px",
+                  color: "var(--color-popover-foreground)",
                 }}
+                itemStyle={{ color: "var(--color-popover-foreground)" }}
+                labelStyle={{ color: "var(--color-popover-foreground)" }}
+                formatter={(value: number | undefined) => [`${value ?? 0} matches`, null]}
               />
               <Bar
                 dataKey="value"
+                name="Matches"
                 fill="var(--color-indigo-500, #6366f1)"
                 radius={[0, 4, 4, 0]}
                 animationDuration={1000}

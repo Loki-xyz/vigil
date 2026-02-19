@@ -50,6 +50,11 @@ export function useClearMatchData() {
         .delete()
         .neq("id", "00000000-0000-0000-0000-000000000000")
       if (judgError) throw judgError
+      const { error: watchError } = await supabase
+        .from("watches")
+        .update({ last_poll_result_count: 0, last_polled_at: null })
+        .neq("id", "00000000-0000-0000-0000-000000000000")
+      if (watchError) throw watchError
     },
     onSuccess: () => {
       queryClient.invalidateQueries()

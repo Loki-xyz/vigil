@@ -122,7 +122,7 @@ describe("useUpdateSetting", () => {
 })
 
 describe("useClearMatchData", () => {
-  it("deletes from watch_matches and judgments", async () => {
+  it("deletes from watch_matches and judgments, resets watch counts", async () => {
     const chain = mockChain(null)
     vi.mocked(supabase.from).mockReturnValue(chain)
 
@@ -135,7 +135,12 @@ describe("useClearMatchData", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(supabase.from).toHaveBeenCalledWith("watch_matches")
     expect(supabase.from).toHaveBeenCalledWith("judgments")
+    expect(supabase.from).toHaveBeenCalledWith("watches")
     expect(chain.delete).toHaveBeenCalled()
+    expect(chain.update).toHaveBeenCalledWith({
+      last_poll_result_count: 0,
+      last_polled_at: null,
+    })
     expect(chain.neq).toHaveBeenCalledWith(
       "id",
       "00000000-0000-0000-0000-000000000000"

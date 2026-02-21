@@ -1,7 +1,7 @@
 """
 Tests for vigil.sc_client — SC website scraper client.
 
-All HTTP calls are mocked. Pytesseract is mocked (never calls real OCR).
+All HTTP calls are mocked. EasyOCR and pytesseract are mocked (never calls real OCR).
 """
 
 from __future__ import annotations
@@ -78,6 +78,19 @@ def _make_results_html(rows: list[tuple[str, str, str, str, str, str]]) -> str:
     return f"<table>{header}<tbody>{body}</tbody></table>"
 
 
+# ── EasyOCR Auto-Mock ────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _mock_easyocr_reader():
+    """Prevent EasyOCR from loading real models during tests."""
+    mock_reader = MagicMock()
+    mock_reader.readtext.return_value = []
+    with patch.object(SCClient, "_easyocr_reader", mock_reader):
+        with patch.object(SCClient, "_get_easyocr_reader", return_value=mock_reader):
+            yield mock_reader
+
+
 # ── Math Expression Parsing ──────────────────────────────
 
 
@@ -127,7 +140,55 @@ class TestParseMathExpression:
 
 
 class TestSolveMathCaptcha:
-    """Tests for _solve_math_captcha with parallel + confidence-based selection."""
+    """Tests for _solve_math_captcha with EasyOCR + parallel Tesseract."""
+
+    async def test_easyocr_succeeds_first(self, _mock_easyocr_reader):
+        """When EasyOCR returns a high-confidence result, use it immediately."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        _mock_easyocr_reader.readtext.return_value = [
+            ([[0, 0], [100, 0], [100, 50], [0, 50]], "3 + 5", 0.95)
+        ]
+        result = await client._solve_math_captcha(image_bytes)
+        assert result == 8
+
+    async def test_easyocr_low_confidence_falls_through(self, _mock_easyocr_reader):
+        """When EasyOCR confidence is below 0.3, fall through to Tesseract."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        _mock_easyocr_reader.readtext.return_value = [
+            ([[0, 0], [100, 0], [100, 50], [0, 50]], "3 + 5", 0.1)
+        ]
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("3 + 5 = ?", 90.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
+        assert result == 8
+
+    async def test_easyocr_empty_falls_through(self, _mock_easyocr_reader):
+        """When EasyOCR returns no results, fall through to Tesseract."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        _mock_easyocr_reader.readtext.return_value = []
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("6 x 3 = ?", 85.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
+        assert result == 18
+
+    async def test_easyocr_exception_falls_through(self, _mock_easyocr_reader):
+        """When EasyOCR raises, gracefully fall through to Tesseract."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        _mock_easyocr_reader.readtext.side_effect = RuntimeError("EasyOCR crash")
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("4 + 2 = ?", 90.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
+        assert result == 6
 
     async def test_high_confidence_parallel_returns_immediately(self):
         """When a parallel-batch strategy returns >80 confidence, use it."""

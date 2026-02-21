@@ -9,7 +9,7 @@ DESIGN PRINCIPLES (mirroring ik_client.py):
 2. All calls have timeouts (60s default for PDF downloads).
 3. Retries with backoff on 5xx and network errors.
 4. Rate limiting: max 1 request per 3 seconds (polite scraping).
-5. Math captcha solved via Pillow + pytesseract OCR.
+5. Math captcha solved via EasyOCR (primary) + pytesseract (fallback).
 6. PDF text extraction via PyMuPDF (fitz).
 7. All methods are async.
 """
@@ -26,6 +26,7 @@ from datetime import date, datetime
 from io import BytesIO
 
 import cv2
+import easyocr
 import fitz  # PyMuPDF
 import httpx
 import numpy as np
@@ -157,6 +158,18 @@ class SCClient:
 
         pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
 
+    # ------------------------------------------------------------------
+    # EasyOCR reader (singleton — heavy to initialize)
+    # ------------------------------------------------------------------
+
+    _easyocr_reader: easyocr.Reader | None = None
+
+    @classmethod
+    def _get_easyocr_reader(cls) -> easyocr.Reader:
+        if cls._easyocr_reader is None:
+            cls._easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        return cls._easyocr_reader
+
     async def _rate_limit(self) -> None:
         """Ensure minimum interval between requests."""
         async with self._semaphore:
@@ -244,6 +257,31 @@ class SCClient:
         resp.raise_for_status()
         return resp.content
 
+    @staticmethod
+    def _prepare_easyocr_variants(image_bytes: bytes) -> list[tuple[str, np.ndarray]]:
+        """Prepare image variants for EasyOCR (preprocessed, raw, inverted)."""
+        pil_img = Image.open(BytesIO(image_bytes))
+        variants: list[tuple[str, np.ndarray]] = []
+
+        # Variant 1: Preprocessed (autocontrast + threshold + upscale)
+        gray = pil_img.convert("L")
+        pre = ImageOps.autocontrast(gray, cutoff=5)
+        pre = pre.point(lambda x: 255 if x > 140 else 0)
+        pre = pre.resize((pre.width * 3, pre.height * 3), Image.LANCZOS)
+        variants.append(("preprocessed", np.array(pre)))
+
+        # Variant 2: Raw image (sometimes catches what preprocessing loses)
+        variants.append(("raw", np.array(pil_img)))
+
+        # Variant 3: Inverted + contrast (helps with light-colored captcha text)
+        inv = ImageOps.autocontrast(gray, cutoff=5)
+        inv = ImageOps.invert(inv)
+        inv = inv.point(lambda x: 255 if x > 100 else 0)
+        inv = inv.resize((inv.width * 3, inv.height * 3), Image.LANCZOS)
+        variants.append(("inverted", np.array(inv)))
+
+        return variants
+
     def _get_ordered_strategies(self) -> list[_PreprocessConfig]:
         """Return strategies ordered by historical success rate."""
         return sorted(
@@ -256,21 +294,58 @@ class SCClient:
         """
         OCR the captcha image and solve the math expression.
 
-        Two-phase approach for speed + reliability:
-          Phase 1: Run top 3 strategies in parallel. If any yields a
-                   high-confidence (>80) parseable result, return immediately.
-          Phase 2: Run remaining strategies sequentially, collecting all
-                   parseable candidates. Pick highest confidence.
+        Three-phase approach for accuracy + speed:
+          Phase 0: EasyOCR (deep learning) with 3 image variants.
+                   Best at recognizing small/light operators (+, -, x).
+          Phase 1: Run top 3 Tesseract+OpenCV strategies in parallel.
+                   If any yields >80 confidence, return immediately.
+          Phase 2: Run remaining Tesseract strategies sequentially,
+                   collecting all parseable candidates. Pick highest confidence.
 
         Returns the integer answer.
         Raises SCCaptchaError if no strategy can parse the expression.
         """
+        last_text = ""
+
+        # Phase 0: EasyOCR with multiple image variants (best success rate)
+        try:
+            reader = self._get_easyocr_reader()
+            easyocr_variants = self._prepare_easyocr_variants(image_bytes)
+
+            for variant_name, img_array in easyocr_variants:
+                try:
+                    results = reader.readtext(
+                        img_array, allowlist="0123456789+-x*/= ",
+                    )
+                    if not results:
+                        continue
+                    text = results[0][1]
+                    conf = results[0][2]
+                    if conf < 0.3:
+                        last_text = text
+                        continue
+                    answer = self._parse_math_expression(text)
+                    logger.debug(
+                        "Captcha solved with EasyOCR %r: text=%r conf=%.2f answer=%d",
+                        variant_name, text, conf, answer,
+                    )
+                    _strategy_success_counts["easyocr"] = (
+                        _strategy_success_counts.get("easyocr", 0) + 1
+                    )
+                    return answer
+                except SCCaptchaError:
+                    if "text" in dir():
+                        last_text = text
+                    continue
+        except Exception:
+            logger.warning("EasyOCR failed, falling back to Tesseract", exc_info=True)
+
+        # Phase 1: Tesseract parallel batch
         strategies = self._get_ordered_strategies()
         parallel_batch = strategies[:_PARALLEL_BATCH_SIZE]
         sequential_batch = strategies[_PARALLEL_BATCH_SIZE:]
 
         candidates: list[tuple[float, int, str, str]] = []  # (conf, answer, name, text)
-        last_text = ""
 
         # Phase 1: parallel batch
         tasks = [
@@ -335,8 +410,9 @@ class SCClient:
         # All strategies failed
         self._log_captcha_failure(image_bytes, last_text)
         raise SCCaptchaError(
-            f"Could not parse math from captcha after {len(_PREPROCESS_STRATEGIES)} "
-            f"strategies. Last OCR text: {last_text!r}"
+            f"Could not parse math from captcha after EasyOCR + "
+            f"{len(_PREPROCESS_STRATEGIES)} Tesseract strategies. "
+            f"Last OCR text: {last_text!r}"
         )
 
     async def _ocr_with_config(

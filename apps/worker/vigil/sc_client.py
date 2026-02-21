@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class SCScraperError(Exception):
     """Base exception for SC website scraper errors."""
 
@@ -64,9 +65,11 @@ class SCPDFDownloadError(SCScraperError):
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SCOrderRecord:
     """Parsed row from the SC daily orders results table."""
+
     case_number: str
     diary_number: str
     parties: str
@@ -78,6 +81,7 @@ class SCOrderRecord:
 @dataclass
 class _PreprocessConfig:
     """One preprocessing strategy for captcha OCR."""
+
     name: str
     threshold: int
     contrast_cutoff: float
@@ -86,38 +90,65 @@ class _PreprocessConfig:
     sharpen: bool = False
     psm: int = 7
     adaptive_threshold: bool = False
-    blur_type: str = "median"       # "median" | "gaussian" | "none"
-    morph_close: bool = True        # fill small gaps in digit strokes
-    morph_open: bool = False        # remove salt-and-pepper noise dots
+    blur_type: str = "median"  # "median" | "gaussian" | "none"
+    morph_close: bool = True  # fill small gaps in digit strokes
+    morph_open: bool = False  # remove salt-and-pepper noise dots
 
 
 # Strategies ordered by expected reliability. Top 3 run in parallel.
 _PREPROCESS_STRATEGIES = [
     # --- Parallel batch (Group A) ---
     _PreprocessConfig(
-        "adaptive_morph", threshold=0, contrast_cutoff=5, upscale=3,
-        adaptive_threshold=True, morph_close=True, blur_type="gaussian",
+        "adaptive_morph",
+        threshold=0,
+        contrast_cutoff=5,
+        upscale=3,
+        adaptive_threshold=True,
+        morph_close=True,
+        blur_type="gaussian",
     ),
     _PreprocessConfig(
-        "default_morph", threshold=140, contrast_cutoff=5, upscale=3,
-        morph_close=True, blur_type="gaussian",
+        "default_morph",
+        threshold=140,
+        contrast_cutoff=5,
+        upscale=3,
+        morph_close=True,
+        blur_type="gaussian",
     ),
     _PreprocessConfig(
-        "high_thresh_morph", threshold=180, contrast_cutoff=3, upscale=3,
+        "high_thresh_morph",
+        threshold=180,
+        contrast_cutoff=3,
+        upscale=3,
         morph_close=True,
     ),
     # --- Sequential fallbacks (Group B) ---
     _PreprocessConfig(
-        "inverted_adaptive", threshold=0, contrast_cutoff=5, upscale=3,
-        invert=True, adaptive_threshold=True, morph_close=True,
+        "inverted_adaptive",
+        threshold=0,
+        contrast_cutoff=5,
+        upscale=3,
+        invert=True,
+        adaptive_threshold=True,
+        morph_close=True,
     ),
     _PreprocessConfig(
-        "low_thresh_sharp", threshold=100, contrast_cutoff=8, upscale=4,
-        sharpen=True, morph_close=True, morph_open=True,
+        "low_thresh_sharp",
+        threshold=100,
+        contrast_cutoff=8,
+        upscale=4,
+        sharpen=True,
+        morph_close=True,
+        morph_open=True,
     ),
     _PreprocessConfig(
-        "high_contrast_clean", threshold=160, contrast_cutoff=0, upscale=3,
-        morph_close=True, morph_open=True, blur_type="gaussian",
+        "high_contrast_clean",
+        threshold=160,
+        contrast_cutoff=0,
+        upscale=3,
+        morph_close=True,
+        morph_open=True,
+        blur_type="gaussian",
     ),
 ]
 
@@ -130,6 +161,7 @@ _strategy_success_counts: dict[str, int] = {s.name: 0 for s in _PREPROCESS_STRAT
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
 
 class SCClient:
     """Async client for scraping SC daily orders from sci.gov.in."""
@@ -170,6 +202,22 @@ class SCClient:
             cls._easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
         return cls._easyocr_reader
 
+    @classmethod
+    def unload_easyocr(cls) -> None:
+        """Free the EasyOCR reader and its PyTorch models to reclaim ~250MB RAM.
+
+        Called after SC scrape cycles complete. The reader will be
+        re-initialised lazily on the next scrape (adds ~15-30s, acceptable
+        for a job that runs only 2-3 times per day).
+        """
+        if cls._easyocr_reader is not None:
+            del cls._easyocr_reader
+            cls._easyocr_reader = None
+            import gc
+
+            gc.collect()
+            logger.info("EasyOCR reader unloaded to free memory.")
+
     async def _rate_limit(self) -> None:
         """Ensure minimum interval between requests."""
         async with self._semaphore:
@@ -190,15 +238,17 @@ class SCClient:
     ) -> None:
         """Insert into api_call_log table. Fire-and-forget — never raises."""
         try:
-            supabase.table("api_call_log").insert({
-                "endpoint": endpoint,
-                "request_url": url,
-                "watch_id": watch_id,
-                "http_status": http_status,
-                "result_count": result_count,
-                "response_time_ms": int(response_time_ms),
-                "error_message": error_message,
-            }).execute()
+            supabase.table("api_call_log").insert(
+                {
+                    "endpoint": endpoint,
+                    "request_url": url,
+                    "watch_id": watch_id,
+                    "http_status": http_status,
+                    "result_count": result_count,
+                    "response_time_ms": int(response_time_ms),
+                    "error_message": error_message,
+                }
+            ).execute()
         except Exception:
             logger.warning("Failed to log SC scraper API call", exc_info=True)
 
@@ -224,7 +274,9 @@ class SCClient:
         resp.raise_for_status()
         logger.info(
             "SC page loaded: status=%d url=%s length=%d",
-            resp.status_code, str(resp.url), len(resp.text),
+            resp.status_code,
+            str(resp.url),
+            len(resp.text),
         )
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -319,7 +371,8 @@ class SCClient:
             for variant_name, img_array in easyocr_variants:
                 try:
                     results = reader.readtext(
-                        img_array, allowlist="0123456789+-x*/= ",
+                        img_array,
+                        allowlist="0123456789+-x*/= ",
                     )
                     if not results:
                         continue
@@ -331,7 +384,10 @@ class SCClient:
                     answer = self._parse_math_expression(text)
                     logger.debug(
                         "Captcha solved with EasyOCR %r: text=%r conf=%.2f answer=%d",
-                        variant_name, text, conf, answer,
+                        variant_name,
+                        text,
+                        conf,
+                        answer,
                     )
                     _strategy_success_counts["easyocr"] = (
                         _strategy_success_counts.get("easyocr", 0) + 1
@@ -352,10 +408,7 @@ class SCClient:
         candidates: list[tuple[float, int, str, str]] = []  # (conf, answer, name, text)
 
         # Phase 1: parallel batch
-        tasks = [
-            self._ocr_with_config(image_bytes, cfg)
-            for cfg in parallel_batch
-        ]
+        tasks = [self._ocr_with_config(image_bytes, cfg) for cfg in parallel_batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for cfg, result in zip(parallel_batch, results):
@@ -367,7 +420,10 @@ class SCClient:
                 answer = self._parse_math_expression(text)
                 logger.debug(
                     "Captcha candidate from %r: text=%r, conf=%.1f, answer=%d",
-                    cfg.name, text, confidence, answer,
+                    cfg.name,
+                    text,
+                    confidence,
+                    answer,
                 )
                 if confidence > 80:
                     _strategy_success_counts[cfg.name] = (
@@ -386,7 +442,10 @@ class SCClient:
                 answer = self._parse_math_expression(text)
                 logger.debug(
                     "Captcha candidate from %r: text=%r, conf=%.1f, answer=%d",
-                    cfg.name, text, confidence, answer,
+                    cfg.name,
+                    text,
+                    confidence,
+                    answer,
                 )
                 if confidence > 80:
                     _strategy_success_counts[cfg.name] = (
@@ -404,7 +463,11 @@ class SCClient:
             logger.info(
                 "Captcha solved (best of %d candidates): strategy=%r, "
                 "text=%r, conf=%.1f, answer=%d",
-                len(candidates), best_name, best_text, best_conf, best_answer,
+                len(candidates),
+                best_name,
+                best_text,
+                best_conf,
+                best_answer,
             )
             _strategy_success_counts[best_name] = (
                 _strategy_success_counts.get(best_name, 0) + 1
@@ -420,7 +483,9 @@ class SCClient:
         )
 
     async def _ocr_with_config(
-        self, image_bytes: bytes, config: _PreprocessConfig,
+        self,
+        image_bytes: bytes,
+        config: _PreprocessConfig,
     ) -> tuple[str, float]:
         """Apply a specific preprocessing config and return (text, confidence).
 
@@ -467,7 +532,8 @@ class SCClient:
             img_array = np.array(img, dtype=np.uint8)
             if config.adaptive_threshold:
                 img_array = cv2.adaptiveThreshold(
-                    img_array, 255,
+                    img_array,
+                    255,
                     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                     cv2.THRESH_BINARY,
                     blockSize=11,
@@ -475,7 +541,10 @@ class SCClient:
                 )
             elif config.threshold > 0:
                 _, img_array = cv2.threshold(
-                    img_array, config.threshold, 255, cv2.THRESH_BINARY,
+                    img_array,
+                    config.threshold,
+                    255,
+                    cv2.THRESH_BINARY,
                 )
 
             # 6. Morphological operations (on binary image)
@@ -496,19 +565,19 @@ class SCClient:
 
             # 9. OCR with confidence scoring
             tess_config = (
-                f"--psm {config.psm} "
-                '-c tessedit_char_whitelist="0123456789 +-xX*=?"'
+                f'--psm {config.psm} -c tessedit_char_whitelist="0123456789 +-xX*=?"'
             )
             data = pytesseract.image_to_data(
-                img, config=tess_config, output_type=pytesseract.Output.DICT,
+                img,
+                config=tess_config,
+                output_type=pytesseract.Output.DICT,
             )
             confidences = [
-                int(c) for c, t in zip(data["conf"], data["text"])
+                int(c)
+                for c, t in zip(data["conf"], data["text"])
                 if t.strip() and int(c) > 0
             ]
-            avg_conf = (
-                sum(confidences) / len(confidences) if confidences else 0.0
-            )
+            avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
             text = " ".join(t for t in data["text"] if t.strip())
             return text.strip(), avg_conf
 
@@ -520,7 +589,8 @@ class SCClient:
         except asyncio.TimeoutError:
             logger.warning(
                 "Tesseract OCR timed out after %.1fs with strategy %r",
-                ocr_timeout, config.name,
+                ocr_timeout,
+                config.name,
             )
             raise SCCaptchaError(f"OCR timed out with strategy {config.name!r}")
 
@@ -575,13 +645,18 @@ class SCClient:
             logger.error(
                 "CAPTCHA_DIAGNOSTIC: All strategies failed. "
                 "Last OCR text: %r. Image: %dx%d mode=%s size=%d bytes",
-                last_ocr_text, img.width, img.height, img.mode, len(image_bytes),
+                last_ocr_text,
+                img.width,
+                img.height,
+                img.mode,
+                len(image_bytes),
             )
         except Exception:
             logger.error(
                 "CAPTCHA_DIAGNOSTIC: All strategies failed. "
                 "Last OCR text: %r. Image size: %d bytes (could not open)",
-                last_ocr_text, len(image_bytes),
+                last_ocr_text,
+                len(image_bytes),
             )
 
         # Optionally save to disk for debugging
@@ -589,7 +664,9 @@ class SCClient:
             try:
                 os.makedirs(settings.sc_captcha_debug_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = os.path.join(settings.sc_captcha_debug_dir, f"captcha_fail_{ts}.png")
+                path = os.path.join(
+                    settings.sc_captcha_debug_dir, f"captcha_fail_{ts}.png"
+                )
                 with open(path, "wb") as f:
                     f.write(image_bytes)
                 logger.error("CAPTCHA_DIAGNOSTIC: Saved failed captcha to %s", path)
@@ -666,13 +743,15 @@ class SCClient:
                     order_date = self._parse_date(date_text)
 
                 if case_number and pdf_url:
-                    records.append(SCOrderRecord(
-                        case_number=case_number,
-                        diary_number=diary_number,
-                        parties=parties,
-                        order_date=order_date,
-                        pdf_url=pdf_url,
-                    ))
+                    records.append(
+                        SCOrderRecord(
+                            case_number=case_number,
+                            diary_number=diary_number,
+                            parties=parties,
+                            order_date=order_date,
+                            pdf_url=pdf_url,
+                        )
+                    )
             except Exception:
                 logger.warning("Failed to parse SC order row", exc_info=True)
                 continue
@@ -683,6 +762,7 @@ class SCClient:
     def _parse_date(date_text: str) -> date | None:
         """Parse DD-MM-YYYY or DD/MM/YYYY to a date object."""
         from datetime import datetime as dt
+
         for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y"):
             try:
                 return dt.strptime(date_text, fmt).date()
@@ -726,7 +806,9 @@ class SCClient:
                 answer = await self._solve_math_captcha(image_bytes)
                 logger.info(
                     "Captcha attempt %d/%d: solved answer=%d",
-                    attempt + 1, self._captcha_max_attempts, answer,
+                    attempt + 1,
+                    self._captcha_max_attempts,
+                    answer,
                 )
 
                 # Step 4: GET with query params
@@ -756,8 +838,12 @@ class SCClient:
 
                 if not resp.is_success:
                     await self._log_call(
-                        "sc_daily_orders", self._ajax_url, watch_id,
-                        resp.status_code, None, elapsed_ms,
+                        "sc_daily_orders",
+                        self._ajax_url,
+                        watch_id,
+                        resp.status_code,
+                        None,
+                        elapsed_ms,
                         f"HTTP {resp.status_code}",
                     )
                     if resp.status_code >= 500:
@@ -776,7 +862,9 @@ class SCClient:
                     logger.warning(
                         "Captcha answer %d rejected by server (attempt %d/%d). "
                         "Response preview: %s",
-                        answer, attempt + 1, self._captcha_max_attempts,
+                        answer,
+                        attempt + 1,
+                        self._captcha_max_attempts,
                         resp.text[:200],
                     )
                     last_err = SCCaptchaError(
@@ -797,13 +885,21 @@ class SCClient:
                     )
 
                 await self._log_call(
-                    "sc_daily_orders", self._ajax_url, watch_id,
-                    resp.status_code, len(records), elapsed_ms, None,
+                    "sc_daily_orders",
+                    self._ajax_url,
+                    watch_id,
+                    resp.status_code,
+                    len(records),
+                    elapsed_ms,
+                    None,
                 )
 
                 logger.info(
                     "SC scraper fetched %d orders for %s to %s (attempt %d)",
-                    len(records), from_date, to_date, attempt + 1,
+                    len(records),
+                    from_date,
+                    to_date,
+                    attempt + 1,
                 )
                 return records
 
@@ -811,7 +907,9 @@ class SCClient:
                 last_err = e
                 logger.warning(
                     "Captcha attempt %d/%d failed: %s",
-                    attempt + 1, self._captcha_max_attempts, e,
+                    attempt + 1,
+                    self._captcha_max_attempts,
+                    e,
                 )
                 continue
             except SCWebsiteUnavailableError:
@@ -819,16 +917,25 @@ class SCClient:
             except httpx.TimeoutException:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
                 await self._log_call(
-                    "sc_daily_orders", self._ajax_url, watch_id,
-                    None, None, elapsed_ms, "Timeout",
+                    "sc_daily_orders",
+                    self._ajax_url,
+                    watch_id,
+                    None,
+                    None,
+                    elapsed_ms,
+                    "Timeout",
                 )
                 raise SCWebsiteUnavailableError("SC website request timed out")
 
         # All captcha attempts failed
         elapsed_ms = int((time.monotonic() - start) * 1000)
         await self._log_call(
-            "sc_daily_orders", self._ajax_url, watch_id,
-            None, None, elapsed_ms,
+            "sc_daily_orders",
+            self._ajax_url,
+            watch_id,
+            None,
+            None,
+            elapsed_ms,
             f"Captcha failed after {self._captcha_max_attempts} attempts",
         )
         raise SCCaptchaError(
@@ -856,11 +963,12 @@ class SCClient:
 
             pdf_bytes = resp.content
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-            text_parts = []
-            for page in doc:
-                text_parts.append(page.get_text())
-            doc.close()
+            try:
+                text_parts = []
+                for page in doc:
+                    text_parts.append(page.get_text())
+            finally:
+                doc.close()
 
             full_text = "\n".join(text_parts)
             full_text = re.sub(r"\n{3,}", "\n\n", full_text)
@@ -871,15 +979,11 @@ class SCClient:
                 f"PDF download failed with HTTP {e.response.status_code}: {pdf_url}"
             ) from e
         except httpx.TimeoutException as e:
-            raise SCPDFDownloadError(
-                f"PDF download timed out: {pdf_url}"
-            ) from e
+            raise SCPDFDownloadError(f"PDF download timed out: {pdf_url}") from e
         except Exception as e:
             if isinstance(e, SCPDFDownloadError):
                 raise
-            raise SCPDFDownloadError(
-                f"PDF extraction failed for {pdf_url}: {e}"
-            ) from e
+            raise SCPDFDownloadError(f"PDF extraction failed for {pdf_url}: {e}") from e
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

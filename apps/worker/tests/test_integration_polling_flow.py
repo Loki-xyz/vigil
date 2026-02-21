@@ -2,7 +2,7 @@
 Integration tests for the full polling flow.
 
 Wires multiple modules together with mocks only at
-the external boundary (IK API via httpx, SMTP, Slack).
+the external boundary (IK API via httpx, SMTP).
 """
 
 from __future__ import annotations
@@ -68,21 +68,23 @@ class TestFullPollingCycle:
 
         # Sequential execute calls: watches query, then per-watch matcher + update
         patch_supabase.table.return_value.execute.side_effect = [
-            MagicMock(data=[watch_a, watch_b]),                 # fetch active watches
+            MagicMock(data=[watch_a, watch_b]),  # fetch active watches
             MagicMock(data=[{"id": "j1", "ik_doc_id": 111}]),  # judgment upsert A
-            MagicMock(data=[{"id": "wm1"}]),                    # match insert A
-            MagicMock(data=[{}]),                                # watch update A
+            MagicMock(data=[{"id": "wm1"}]),  # match insert A
+            MagicMock(data=[{}]),  # watch update A
             MagicMock(data=[{"id": "j2", "ik_doc_id": 222}]),  # judgment upsert B
-            MagicMock(data=[{"id": "wm2"}]),                    # match insert B
-            MagicMock(data=[{}]),                                # watch update B
-            MagicMock(data=[]),                                  # dispatch: no unnotified
+            MagicMock(data=[{"id": "wm2"}]),  # match insert B
+            MagicMock(data=[{}]),  # watch update B
+            MagicMock(data=[]),  # dispatch: no unnotified
         ]
 
         mock_client = AsyncMock()
-        mock_client.search = AsyncMock(side_effect=[
-            {"found": 1, "docs": [_make_ik_doc(111, "Judgment A")]},
-            {"found": 1, "docs": [_make_ik_doc(222, "Judgment B")]},
-        ])
+        mock_client.search = AsyncMock(
+            side_effect=[
+                {"found": 1, "docs": [_make_ik_doc(111, "Judgment A")]},
+                {"found": 1, "docs": [_make_ik_doc(222, "Judgment B")]},
+            ]
+        )
 
         with patch("vigil.polling._get_ik_client", return_value=mock_client):
             await poll_cycle()
@@ -97,7 +99,7 @@ class TestFullPollingCycle:
         """
         from vigil.polling import check_poll_requests
 
-        watch = _make_watch("Poll Now Watch")
+        watch = _make_watch("Poll Now Watch", court_filter=["delhi"])
         poll_request = {
             "id": str(uuid.uuid4()),
             "watch_id": watch["id"],
@@ -112,14 +114,16 @@ class TestFullPollingCycle:
         # 3. fetch watch via .single() (returns dict, not list)
         # 4. mark as done
         patch_supabase.table.return_value.execute.side_effect = [
-            MagicMock(data=[]),              # stale request cleanup (none found)
+            MagicMock(data=[]),  # stale request cleanup (none found)
             MagicMock(data=[poll_request]),  # pending poll requests
-            MagicMock(data=[{}]),            # update status=processing
-            MagicMock(data=watch),           # fetch watch (.single())
-            MagicMock(data=[{}]),            # update status=done
+            MagicMock(data=[{}]),  # update status=processing
+            MagicMock(data=watch),  # fetch watch (.single())
+            MagicMock(data=[{}]),  # update status=done
         ]
 
-        with patch("vigil.polling.poll_single_watch", new_callable=AsyncMock) as mock_poll:
+        with patch(
+            "vigil.polling.poll_single_watch", new_callable=AsyncMock
+        ) as mock_poll:
             mock_poll.return_value = [{"id": "m1"}]
 
             await check_poll_requests()
@@ -140,10 +144,14 @@ class TestFullPollingCycle:
 
         # Set up sequential returns for upsert + insert across both calls
         patch_supabase.table.return_value.execute.side_effect = [
-            MagicMock(data=[{"id": "j1", "ik_doc_id": 111}]),  # judgment upsert (watch A)
-            MagicMock(data=[{"id": "wm1"}]),                    # match insert (watch A)
-            MagicMock(data=[{"id": "j1", "ik_doc_id": 111}]),  # judgment upsert (watch B, same j1)
-            MagicMock(data=[{"id": "wm2"}]),                    # match insert (watch B)
+            MagicMock(
+                data=[{"id": "j1", "ik_doc_id": 111}]
+            ),  # judgment upsert (watch A)
+            MagicMock(data=[{"id": "wm1"}]),  # match insert (watch A)
+            MagicMock(
+                data=[{"id": "j1", "ik_doc_id": 111}]
+            ),  # judgment upsert (watch B, same j1)
+            MagicMock(data=[{"id": "wm2"}]),  # match insert (watch B)
         ]
 
         result_a = await process_search_results(watch_a_id, same_doc)
@@ -160,9 +168,7 @@ class TestFullPollingCycle:
         from vigil.polling import poll_cycle
 
         watches = [_make_watch(f"Watch {i}") for i in range(3)]
-        patch_supabase.table.return_value.execute.return_value = MagicMock(
-            data=watches
-        )
+        patch_supabase.table.return_value.execute.return_value = MagicMock(data=watches)
 
         call_count = 0
 
@@ -189,7 +195,6 @@ class TestFullPollingCycle:
 
         test_settings.notification_email_enabled = True
         test_settings.notification_email_recipients = "a@b.com"
-        test_settings.notification_slack_enabled = False
 
         match_with_retry = {
             "id": "m1",
@@ -206,23 +211,27 @@ class TestFullPollingCycle:
 
         # First dispatch — email fails
         patch_supabase.table.return_value.execute.side_effect = [
-            MagicMock(data=[match_with_retry]),                 # fetch unnotified
+            MagicMock(data=[match_with_retry]),  # fetch unnotified
             MagicMock(data=[{"id": "w1", "name": "Test Watch"}]),  # fetch watch names
         ]
         mock_smtp.send_message.side_effect = Exception("SMTP error")
         await dispatch_pending_notifications()
 
         # No is_notified update should have happened
-        update_calls_after_fail = patch_supabase.table.return_value.update.call_args_list
-        notified_updates = [c for c in update_calls_after_fail if "is_notified" in str(c)]
+        update_calls_after_fail = (
+            patch_supabase.table.return_value.update.call_args_list
+        )
+        notified_updates = [
+            c for c in update_calls_after_fail if "is_notified" in str(c)
+        ]
         assert len(notified_updates) == 0
 
         # Second dispatch — email succeeds
         patch_supabase.table.return_value.update.reset_mock()
         patch_supabase.table.return_value.execute.side_effect = [
-            MagicMock(data=[match_with_retry]),                 # fetch unnotified
+            MagicMock(data=[match_with_retry]),  # fetch unnotified
             MagicMock(data=[{"id": "w1", "name": "Test Watch"}]),  # fetch watch names
-            MagicMock(data=[{}]),                                # update is_notified
+            MagicMock(data=[{}]),  # update is_notified
         ]
         mock_smtp.send_message.side_effect = None
         await dispatch_pending_notifications()
@@ -260,11 +269,13 @@ class TestFullPollingCycle:
 
         patch_supabase.table.return_value.execute.side_effect = [
             MagicMock(data=matches),  # fetch matches from past 24h
-            MagicMock(data=[
-                {"id": "w0", "name": "Watch 0"},
-                {"id": "w1", "name": "Watch 1"},
-                {"id": "w2", "name": "Watch 2"},
-            ]),  # fetch watch names
+            MagicMock(
+                data=[
+                    {"id": "w0", "name": "Watch 0"},
+                    {"id": "w1", "name": "Watch 1"},
+                    {"id": "w2", "name": "Watch 2"},
+                ]
+            ),  # fetch watch names
         ]
 
         await send_daily_digest()

@@ -216,6 +216,7 @@ def sample_watch_act():
 def reset_watch_backoffs():
     """Clear in-memory backoff state between tests."""
     from vigil import polling
+
     polling._watch_backoffs.clear()
     polling._sc_consecutive_failures = 0
     yield
@@ -223,7 +224,7 @@ def reset_watch_backoffs():
     polling._sc_consecutive_failures = 0
 
 
-# ── SMTP / Slack Mocks ────────────────────────────────────
+# ── SMTP Mocks ────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -238,19 +239,6 @@ def mock_smtp():
         smtp_instance.send_message = AsyncMock()
         smtp_instance.quit = AsyncMock()
         yield smtp_instance
-
-
-@pytest.fixture
-def mock_slack_webhook():
-    """Mock httpx.AsyncClient for Slack webhook POST."""
-    with patch("vigil.notifier.httpx.AsyncClient") as client_cls:
-        client = AsyncMock()
-        client_cls.return_value.__aenter__ = AsyncMock(return_value=client)
-        client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        client.post = AsyncMock(
-            return_value=MagicMock(status_code=200, text="ok")
-        )
-        yield client
 
 
 # ── Settings Override ──────────────────────────────────────
@@ -272,12 +260,10 @@ def test_settings():
         mock_settings.smtp_password = "test"
         mock_settings.smtp_from_email = "vigil@test.com"
         mock_settings.smtp_use_tls = False
-        mock_settings.slack_webhook_url = "https://hooks.slack.com/test"
         mock_settings.polling_enabled = True
         mock_settings.first_poll_lookback_days = 4
         mock_settings.timezone = "Asia/Kolkata"
         mock_settings.notification_email_enabled = True
-        mock_settings.notification_slack_enabled = False
         mock_settings.notification_email_recipients = ""
         mock_settings.daily_digest_enabled = True
         # SC scraper settings

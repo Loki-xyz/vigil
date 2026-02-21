@@ -26,12 +26,8 @@ class Settings(BaseSettings):
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
 
-    # Slack notifications
-    slack_webhook_url: str = ""
-
     # Notification preferences
     notification_email_enabled: bool = True
-    notification_slack_enabled: bool = False
     notification_email_recipients: str = ""
     daily_digest_enabled: bool = True
 

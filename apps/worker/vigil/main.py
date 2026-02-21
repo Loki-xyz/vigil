@@ -28,6 +28,20 @@ async def run() -> None:
     except Exception:
         logger.critical("Vigil worker crashed with unexpected error", exc_info=True)
     finally:
+        # Close HTTP clients to release connection pools and SSL contexts.
+        from vigil.polling import _ik_client, _sc_client
+
+        if _ik_client is not None:
+            try:
+                await _ik_client.close()
+            except Exception:
+                logger.warning("Failed to close IK client", exc_info=True)
+        if _sc_client is not None:
+            try:
+                await _sc_client.close()
+            except Exception:
+                logger.warning("Failed to close SC client", exc_info=True)
+
         scheduler.shutdown()
         logger.info("Vigil worker stopped.")
 

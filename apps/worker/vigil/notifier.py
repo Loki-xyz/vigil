@@ -8,17 +8,16 @@ RULES:
 4. Daily digest: summary of all matches from past 24h.
 
 EMAIL SUBJECT: "[Vigil] {watch_name}: {count} new judgment(s)"
-SLACK: Block Kit formatted with linked titles, court, date.
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import aiosmtplib
-import httpx
 
 from vigil.config import settings
 from vigil.supabase_client import supabase
@@ -50,12 +49,14 @@ async def send_email_alert(
         ]
         for i, match in enumerate(matches, 1):
             j = match.get("judgments", {})
-            body_lines.extend([
-                f"  {i}. {j.get('title', 'Unknown')}",
-                f"     Court: {j.get('court', 'Unknown')}",
-                f"     Link:  {j.get('ik_url') or j.get('external_url') or ''}",
-                "",
-            ])
+            body_lines.extend(
+                [
+                    f"  {i}. {j.get('title', 'Unknown')}",
+                    f"     Court: {j.get('court', 'Unknown')}",
+                    f"     Link:  {j.get('ik_url') or j.get('external_url') or ''}",
+                    "",
+                ]
+            )
         body_lines.extend(["=" * 40, "", "Vigil · Trilegal Internal Tool"])
         msg.set_content("\n".join(body_lines))
 
@@ -75,59 +76,8 @@ async def send_email_alert(
         return False
 
 
-async def send_slack_alert(
-    watch_name: str, matches: list[dict], webhook_url: str
-) -> bool:
-    """
-    Send Slack Block Kit message for new matches on a watch.
-
-    Returns True on success, False on failure.
-    """
-    try:
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"Vigil: {watch_name} — {len(matches)} new judgment(s)",
-                },
-            },
-            {"type": "divider"},
-        ]
-        for match in matches:
-            j = match.get("judgments", {})
-            title = j.get("title", "Unknown")
-            url = j.get("ik_url") or j.get("external_url") or ""
-            court = j.get("court", "Unknown")
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*<{url}|{title}>*\n{court}",
-                },
-            })
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": "Vigil · Trilegal Internal"}
-            ],
-        })
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(webhook_url, json={"blocks": blocks})
-            if resp.is_success:
-                logger.info("Slack alert sent for %s", watch_name)
-                return True
-            logger.error("Slack returned %s for %s", resp.status_code, watch_name)
-            return False
-
-    except Exception:
-        logger.error("Slack alert failed for %s", watch_name, exc_info=True)
-        return False
-
-
 async def send_admin_alert(subject: str, message: str) -> None:
-    """Send critical admin alert via all configured channels.
+    """Send critical admin alert via email.
 
     Used for CRITICAL errors like IK API 403 (auth failure).
     Best-effort: logs failures but never raises.
@@ -160,54 +110,22 @@ async def send_admin_alert(subject: str, message: str) -> None:
         except Exception:
             logger.error("Failed to send admin alert email", exc_info=True)
 
-    slack_webhook = settings.slack_webhook_url
-    if slack_webhook:
-        try:
-            blocks = [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f":rotating_light: CRITICAL: {subject}",
-                    },
-                },
-                {"type": "divider"},
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": message},
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {"type": "mrkdwn", "text": "Vigil Admin Alert · Immediate action required"}
-                    ],
-                },
-            ]
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(slack_webhook, json={"blocks": blocks})
-                if resp.is_success:
-                    logger.info("Admin alert Slack sent: %s", subject)
-                else:
-                    logger.error("Admin alert Slack failed: %s", resp.status_code)
-        except Exception:
-            logger.error("Failed to send admin alert Slack", exc_info=True)
-
 
 async def dispatch_pending_notifications() -> None:
     """
     Fetch all un-notified matches, group by watch, and dispatch alerts.
     """
-    # Fetch un-notified matches with judgment data
+    # Fetch un-notified matches with judgment data (excluding full_text
+    # to avoid loading ~100KB per SC judgment into worker memory).
     resp = (
         supabase.table("watch_matches")
-        .select("*, judgments(*)")
+        .select("*, judgments(id, title, court, judgment_date, ik_url, external_url)")
         .eq("is_notified", False)
+        .lt("retry_count", 3)
+        .limit(50)
         .execute()
     )
     matches = resp.data or []
-
-    # Filter out exhausted retries
-    matches = [m for m in matches if m.get("retry_count", 0) < 3]
     if not matches:
         return
 
@@ -219,22 +137,17 @@ async def dispatch_pending_notifications() -> None:
     # Fetch watch names
     watch_ids = list(by_watch.keys())
     watch_resp = (
-        supabase.table("watches")
-        .select("id, name")
-        .in_("id", watch_ids)
-        .execute()
+        supabase.table("watches").select("id, name").in_("id", watch_ids).execute()
     )
     watch_names = {w["id"]: w["name"] for w in (watch_resp.data or [])}
 
     # Read channel config from settings
     email_enabled = settings.notification_email_enabled
-    slack_enabled = settings.notification_slack_enabled
     email_recipients = [
         e.strip()
         for e in settings.notification_email_recipients.split(",")
         if e.strip()
     ]
-    slack_webhook = settings.slack_webhook_url
 
     for watch_id, group in by_watch.items():
         watch_name = watch_names.get(watch_id, "Unknown Watch")
@@ -244,17 +157,15 @@ async def dispatch_pending_notifications() -> None:
         if email_enabled and email_recipients:
             success = await send_email_alert(watch_name, group, email_recipients)
 
-        if slack_enabled and slack_webhook:
-            slack_ok = await send_slack_alert(watch_name, group, slack_webhook)
-            success = success or slack_ok
-
         if success:
             (
                 supabase.table("watch_matches")
-                .update({
-                    "is_notified": True,
-                    "notified_at": datetime.now(timezone.utc).isoformat(),
-                })
+                .update(
+                    {
+                        "is_notified": True,
+                        "notified_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
                 .in_("id", match_ids)
                 .execute()
             )
@@ -281,6 +192,8 @@ async def dispatch_pending_notifications() -> None:
                 len(group),
             )
 
+    gc.collect()
+
 
 async def send_daily_digest() -> None:
     """Send summary of all matches from past 24h. Triggered at 09:00 IST."""
@@ -298,7 +211,7 @@ async def send_daily_digest() -> None:
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     resp = (
         supabase.table("watch_matches")
-        .select("*, judgments(*)")
+        .select("*, judgments(id, title, court, judgment_date, ik_url, external_url)")
         .gte("matched_at", since)
         .execute()
     )
@@ -313,10 +226,7 @@ async def send_daily_digest() -> None:
 
     watch_ids = list(by_watch.keys())
     watch_resp = (
-        supabase.table("watches")
-        .select("id, name")
-        .in_("id", watch_ids)
-        .execute()
+        supabase.table("watches").select("id, name").in_("id", watch_ids).execute()
     )
     watch_names = {w["id"]: w["name"] for w in (watch_resp.data or [])}
 

@@ -31,7 +31,6 @@ def test_default_values(monkeypatch):
     assert s.smtp_password == ""
     assert s.smtp_from_email == ""
     assert s.smtp_use_tls is True
-    assert s.slack_webhook_url == ""
     assert s.polling_enabled is True
     assert s.timezone == "Asia/Kolkata"
 
@@ -60,7 +59,6 @@ def test_all_env_vars_loaded(monkeypatch):
         "VIGIL_SMTP_PASSWORD": "s3cret",
         "VIGIL_SMTP_FROM_EMAIL": "noreply@example.com",
         "VIGIL_SMTP_USE_TLS": "false",
-        "VIGIL_SLACK_WEBHOOK_URL": "https://hooks.slack.com/xxx",
         "VIGIL_POLLING_ENABLED": "true",
         "VIGIL_TIMEZONE": "UTC",
     }
@@ -81,7 +79,6 @@ def test_all_env_vars_loaded(monkeypatch):
     assert s.smtp_password == "s3cret"
     assert s.smtp_from_email == "noreply@example.com"
     assert s.smtp_use_tls is False
-    assert s.slack_webhook_url == "https://hooks.slack.com/xxx"
     assert s.polling_enabled is True
     assert s.timezone == "UTC"
 
@@ -134,9 +131,9 @@ def test_empty_string_defaults(monkeypatch):
 
     s = Settings(_env_file=None)
     assert s.supabase_url == ""
-    assert s.slack_webhook_url == ""
+    assert s.smtp_host == ""
     assert isinstance(s.supabase_url, str)
-    assert isinstance(s.slack_webhook_url, str)
+    assert isinstance(s.smtp_host, str)
 
 
 @pytest.mark.unit

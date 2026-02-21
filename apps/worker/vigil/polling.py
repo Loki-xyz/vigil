@@ -32,7 +32,10 @@ SCHEDULING:
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import platform
+import resource
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -43,13 +46,28 @@ from apscheduler.triggers.interval import IntervalTrigger
 from vigil.config import settings
 from vigil.ik_client import IKAPIAuthError, IKAPIRateLimitError, IKClient
 from vigil.matcher import process_sc_orders, process_search_results
-from vigil.notifier import dispatch_pending_notifications, send_admin_alert, send_daily_digest
+from vigil.notifier import (
+    dispatch_pending_notifications,
+    send_admin_alert,
+    send_daily_digest,
+)
 from vigil.query_builder import build_query
 from vigil.sc_client import SCClient, SCCaptchaError, SCPDFDownloadError, SCScraperError
 from vigil.sc_matcher import match_order_against_watch, needs_pdf_download
 from vigil.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
+
+# macOS ru_maxrss is in bytes; Linux (Render Docker) is in KB.
+_RSS_DIVISOR = 1024 * 1024 if platform.system() == "Darwin" else 1024
+
+
+def _log_memory_usage(context: str) -> None:
+    """Log current peak RSS in MB for memory monitoring."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_mb = usage.ru_maxrss / _RSS_DIVISOR
+    logger.info("MEMORY [%s]: peak RSS = %.1f MB", context, rss_mb)
+
 
 _ik_client: IKClient | None = None
 _sc_client: SCClient | None = None
@@ -120,7 +138,8 @@ async def poll_single_watch(watch: dict) -> list[dict]:
         else:
             # First poll: look back N days to catch recent judgments
             from_date = (
-                datetime.now(timezone.utc) - timedelta(days=settings.first_poll_lookback_days)
+                datetime.now(timezone.utc)
+                - timedelta(days=settings.first_poll_lookback_days)
             ).date()
 
         query = build_query(
@@ -137,10 +156,12 @@ async def poll_single_watch(watch: dict) -> list[dict]:
         matches = await process_search_results(watch["id"], docs)
 
         try:
-            supabase.table("watches").update({
-                "last_polled_at": datetime.now(timezone.utc).isoformat(),
-                "last_poll_result_count": len(docs),
-            }).eq("id", watch["id"]).execute()
+            supabase.table("watches").update(
+                {
+                    "last_polled_at": datetime.now(timezone.utc).isoformat(),
+                    "last_poll_result_count": len(docs),
+                }
+            ).eq("id", watch["id"]).execute()
         except Exception:
             logger.error(
                 "Failed to update last_polled_at for watch %s",
@@ -165,9 +186,7 @@ async def poll_single_watch(watch: dict) -> list[dict]:
         )
         return []
     except Exception:
-        logger.error(
-            "Error polling watch %s", watch.get("id"), exc_info=True
-        )
+        logger.error("Error polling watch %s", watch.get("id"), exc_info=True)
         return []
 
 
@@ -178,12 +197,7 @@ async def poll_cycle() -> None:
         return
 
     try:
-        resp = (
-            supabase.table("watches")
-            .select("*")
-            .eq("is_active", True)
-            .execute()
-        )
+        resp = supabase.table("watches").select("*").eq("is_active", True).execute()
         watches = resp.data or []
     except Exception:
         logger.error(
@@ -198,7 +212,9 @@ async def poll_cycle() -> None:
         try:
             await poll_single_watch(watch)
         except IKAPIAuthError:
-            logger.critical("IK API auth error (403) — halting ALL polling. Sending admin alert.")
+            logger.critical(
+                "IK API auth error (403) — halting ALL polling. Sending admin alert."
+            )
             try:
                 await send_admin_alert(
                     "IK API Authentication Failure (403)",
@@ -210,9 +226,7 @@ async def poll_cycle() -> None:
                 logger.error("Failed to send admin alert for 403", exc_info=True)
             break
         except Exception:
-            logger.error(
-                "Error polling watch %s", watch.get("id"), exc_info=True
-            )
+            logger.error("Error polling watch %s", watch.get("id"), exc_info=True)
             continue
 
     try:
@@ -220,14 +234,15 @@ async def poll_cycle() -> None:
     except Exception:
         logger.error("Error dispatching notifications", exc_info=True)
 
+    gc.collect()
+    _log_memory_usage("after_poll_cycle")
+
 
 async def check_poll_requests() -> None:
     """Check poll_requests table for pending 'Poll Now' requests."""
     # Clean up stale "processing" requests (worker crashed or hung)
     try:
-        stale_cutoff = (
-            datetime.now(timezone.utc) - timedelta(minutes=5)
-        ).isoformat()
+        stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         stale_resp = (
             supabase.table("poll_requests")
             .update({"status": "failed"})
@@ -243,20 +258,15 @@ async def check_poll_requests() -> None:
     except Exception:
         logger.error("Failed to clean up stale poll requests", exc_info=True)
 
-    resp = (
-        supabase.table("poll_requests")
-        .select("*")
-        .eq("status", "pending")
-        .execute()
-    )
+    resp = supabase.table("poll_requests").select("*").eq("status", "pending").execute()
     requests = resp.data or []
 
     for req in requests:
         try:
             # Mark as processing
-            supabase.table("poll_requests").update(
-                {"status": "processing"}
-            ).eq("id", req["id"]).execute()
+            supabase.table("poll_requests").update({"status": "processing"}).eq(
+                "id", req["id"]
+            ).execute()
 
             # Fetch the watch
             watch_resp = (
@@ -275,15 +285,16 @@ async def check_poll_requests() -> None:
                 sc_matches = await sc_scrape_for_watch(watch)
                 logger.info(
                     "Poll Now SC scrape for watch %s found %d matches",
-                    watch["id"], len(sc_matches),
+                    watch["id"],
+                    len(sc_matches),
                 )
             else:
                 await poll_single_watch(watch)
 
             # Mark as done
-            supabase.table("poll_requests").update(
-                {"status": "done"}
-            ).eq("id", req["id"]).execute()
+            supabase.table("poll_requests").update({"status": "done"}).eq(
+                "id", req["id"]
+            ).execute()
 
         except Exception:
             logger.error(
@@ -292,13 +303,11 @@ async def check_poll_requests() -> None:
                 exc_info=True,
             )
             try:
-                supabase.table("poll_requests").update(
-                    {"status": "failed"}
-                ).eq("id", req["id"]).execute()
+                supabase.table("poll_requests").update({"status": "failed"}).eq(
+                    "id", req["id"]
+                ).execute()
             except Exception:
-                logger.error(
-                    "Failed to update poll request status", exc_info=True
-                )
+                logger.error("Failed to update poll request status", exc_info=True)
 
 
 async def sc_scrape_cycle() -> None:
@@ -316,20 +325,16 @@ async def sc_scrape_cycle() -> None:
 
     try:
         # 1. Get all SC watches
-        resp = (
-            supabase.table("watches")
-            .select("*")
-            .eq("is_active", True)
-            .execute()
-        )
+        resp = supabase.table("watches").select("*").eq("is_active", True).execute()
         all_watches = resp.data or []
         sc_watches = [
-            w for w in all_watches
-            if "supremecourt" in (w.get("court_filter") or [])
+            w for w in all_watches if "supremecourt" in (w.get("court_filter") or [])
         ]
 
         if not sc_watches:
-            logger.info("No active watches with supremecourt filter. Skipping SC scrape.")
+            logger.info(
+                "No active watches with supremecourt filter. Skipping SC scrape."
+            )
             return
 
         # 2. Scrape orders (single call, shared across all watches)
@@ -342,7 +347,9 @@ async def sc_scrape_cycle() -> None:
         orders = await client.fetch_daily_orders(from_date, to_date)
         logger.info(
             "SC scraper fetched %d daily orders for %s to %s",
-            len(orders), from_date, to_date,
+            len(orders),
+            from_date,
+            to_date,
         )
 
         if not orders:
@@ -368,9 +375,7 @@ async def sc_scrape_cycle() -> None:
                 try:
                     full_text = await client.download_and_parse_pdf(order.pdf_url)
                 except SCPDFDownloadError:
-                    logger.warning(
-                        "Failed to download PDF for %s", order.case_number
-                    )
+                    logger.warning("Failed to download PDF for %s", order.case_number)
 
             # Re-match watches that needed PDF
             matching_watches_phase2: list[tuple] = []
@@ -393,7 +398,8 @@ async def sc_scrape_cycle() -> None:
                 except Exception:
                     logger.error(
                         "Error processing SC order %s for watch %s",
-                        order.case_number, watch["id"],
+                        order.case_number,
+                        watch["id"],
                         exc_info=True,
                     )
 
@@ -402,7 +408,9 @@ async def sc_scrape_cycle() -> None:
         try:
             await dispatch_pending_notifications()
         except Exception:
-            logger.error("Error dispatching notifications after SC scrape", exc_info=True)
+            logger.error(
+                "Error dispatching notifications after SC scrape", exc_info=True
+            )
 
     except SCCaptchaError:
         _sc_consecutive_failures += 1
@@ -420,7 +428,9 @@ async def sc_scrape_cycle() -> None:
                     "SC scraping will continue to retry on schedule.",
                 )
             except Exception:
-                logger.error("Failed to send admin alert for SC failures", exc_info=True)
+                logger.error(
+                    "Failed to send admin alert for SC failures", exc_info=True
+                )
     except SCScraperError:
         _sc_consecutive_failures += 1
         logger.error("SC website scraping failed", exc_info=True)
@@ -433,10 +443,17 @@ async def sc_scrape_cycle() -> None:
                     "SC scraping will continue to retry on schedule.",
                 )
             except Exception:
-                logger.error("Failed to send admin alert for SC failures", exc_info=True)
+                logger.error(
+                    "Failed to send admin alert for SC failures", exc_info=True
+                )
     except Exception:
         _sc_consecutive_failures += 1
         logger.error("Unexpected error in SC scrape cycle", exc_info=True)
+    finally:
+        # Free EasyOCR reader (~250MB) until next scheduled scrape
+        SCClient.unload_easyocr()
+        gc.collect()
+        _log_memory_usage("after_sc_scrape_cycle")
 
 
 async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
@@ -448,11 +465,16 @@ async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
     to_date = datetime.now(timezone.utc).date()
 
     orders = await client.fetch_daily_orders(
-        from_date, to_date, watch_id=watch["id"],
+        from_date,
+        to_date,
+        watch_id=watch["id"],
     )
     logger.info(
         "Poll Now SC scrape for watch %s fetched %d orders (%s to %s)",
-        watch["id"], len(orders), from_date, to_date,
+        watch["id"],
+        len(orders),
+        from_date,
+        to_date,
     )
 
     if not orders:
@@ -466,13 +488,16 @@ async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
         if result.is_match:
             try:
                 matches = await process_sc_orders(
-                    watch["id"], [(order, result, "")],
+                    watch["id"],
+                    [(order, result, "")],
                 )
                 all_new_matches.extend(matches)
             except Exception:
                 logger.error(
                     "Error processing SC order %s for watch %s",
-                    order.case_number, watch["id"], exc_info=True,
+                    order.case_number,
+                    watch["id"],
+                    exc_info=True,
                 )
             continue
 
@@ -483,7 +508,8 @@ async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
                 full_text = await client.download_and_parse_pdf(order.pdf_url)
             except SCPDFDownloadError:
                 logger.warning(
-                    "Failed to download PDF for %s", order.case_number,
+                    "Failed to download PDF for %s",
+                    order.case_number,
                 )
 
             if full_text:
@@ -491,13 +517,16 @@ async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
                 if result.is_match:
                     try:
                         matches = await process_sc_orders(
-                            watch["id"], [(order, result, full_text)],
+                            watch["id"],
+                            [(order, result, full_text)],
                         )
                         all_new_matches.extend(matches)
                     except Exception:
                         logger.error(
                             "Error processing SC order %s for watch %s",
-                            order.case_number, watch["id"], exc_info=True,
+                            order.case_number,
+                            watch["id"],
+                            exc_info=True,
                         )
 
     return all_new_matches
@@ -527,14 +556,22 @@ async def sc_scrape_for_watch(watch: dict) -> list[dict]:
         return []
     except (SCCaptchaError, SCScraperError):
         logger.error(
-            "SC scrape failed for Poll Now watch %s", watch.get("id"), exc_info=True,
+            "SC scrape failed for Poll Now watch %s",
+            watch.get("id"),
+            exc_info=True,
         )
         return []
     except Exception:
         logger.error(
-            "Unexpected error in SC scrape for watch %s", watch.get("id"), exc_info=True,
+            "Unexpected error in SC scrape for watch %s",
+            watch.get("id"),
+            exc_info=True,
         )
         return []
+    finally:
+        # Free EasyOCR reader after ad-hoc scrape too
+        SCClient.unload_easyocr()
+        gc.collect()
 
 
 def setup_scheduler() -> AsyncIOScheduler:

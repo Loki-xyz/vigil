@@ -1,4 +1,4 @@
-"""Tests for vigil/notifier.py — email, Slack, dispatch, and daily digest."""
+"""Tests for vigil/notifier.py — email, dispatch, and daily digest."""
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -147,7 +147,11 @@ async def test_email_body_contains_details(mock_smtp, test_settings):
     await send_email_alert("AWS Watch", SAMPLE_MATCHES, ["user@example.com"])
 
     sent_msg = mock_smtp.send_message.call_args[0][0]
-    body = sent_msg.get_body().get_content() if hasattr(sent_msg, "get_body") else str(sent_msg)
+    body = (
+        sent_msg.get_body().get_content()
+        if hasattr(sent_msg, "get_body")
+        else str(sent_msg)
+    )
 
     assert "AWS vs CIT" in body
     assert "Delhi HC" in body
@@ -218,97 +222,17 @@ async def test_email_no_tls(mock_smtp, test_settings):
 
 
 # ============================================================================
-# SLACK TESTS
-# ============================================================================
-
-
-# ---------------------------------------------------------------------------
-# 8. Slack success
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_slack_success(mock_slack_webhook):
-    """Returns True, httpx POST with webhook URL."""
-    from vigil.notifier import send_slack_alert
-
-    mock_slack_webhook.post.return_value = MagicMock(status_code=200, is_success=True)
-
-    result = await send_slack_alert(
-        "AWS Watch", SAMPLE_MATCHES, "https://hooks.slack.com/services/T00/B00/xxx"
-    )
-
-    assert result is True
-    mock_slack_webhook.post.assert_called_once()
-    call_args = mock_slack_webhook.post.call_args
-    assert "https://hooks.slack.com/services/T00/B00/xxx" in str(call_args)
-
-
-# ---------------------------------------------------------------------------
-# 9. Slack Block Kit format
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_slack_block_kit_format(mock_slack_webhook):
-    """Payload has 'blocks' key, header block, sections."""
-    from vigil.notifier import send_slack_alert
-
-    mock_slack_webhook.post.return_value = MagicMock(status_code=200, is_success=True)
-
-    await send_slack_alert(
-        "AWS Watch", SAMPLE_MATCHES, "https://hooks.slack.com/services/T00/B00/xxx"
-    )
-
-    call_kwargs = mock_slack_webhook.post.call_args
-    # The JSON payload should contain blocks
-    payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json", {})
-    assert "blocks" in payload
-    block_types = [b["type"] for b in payload["blocks"]]
-    assert "header" in block_types
-    assert "section" in block_types
-
-
-# ---------------------------------------------------------------------------
-# 10. Slack failure returns False
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_slack_failure_returns_false(mock_slack_webhook):
-    """POST returns 500 -> False."""
-    from vigil.notifier import send_slack_alert
-
-    mock_slack_webhook.post.return_value = MagicMock(status_code=500, is_success=False)
-
-    result = await send_slack_alert(
-        "AWS Watch", SAMPLE_MATCHES, "https://hooks.slack.com/services/T00/B00/xxx"
-    )
-
-    assert result is False
-
-
-# ---------------------------------------------------------------------------
-# 11. Slack network error returns False
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_slack_network_error_returns_false(mock_slack_webhook):
-    """httpx raises -> False."""
-    from vigil.notifier import send_slack_alert
-
-    mock_slack_webhook.post.side_effect = Exception("Connection timed out")
-
-    result = await send_slack_alert(
-        "AWS Watch", SAMPLE_MATCHES, "https://hooks.slack.com/services/T00/B00/xxx"
-    )
-
-    assert result is False
-
-
-# ============================================================================
 # DISPATCH TESTS
 # ============================================================================
 
 
 # ---------------------------------------------------------------------------
-# 12. Dispatch fetches unnotified
+# 8. Dispatch fetches unnotified
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_dispatch_fetches_unnotified(patch_supabase, mock_supabase, test_settings):
+async def test_dispatch_fetches_unnotified(
+    patch_supabase, mock_supabase, test_settings
+):
     """Selects where is_notified=False."""
     from vigil.notifier import dispatch_pending_notifications
 
@@ -326,7 +250,7 @@ async def test_dispatch_fetches_unnotified(patch_supabase, mock_supabase, test_s
 
 
 # ---------------------------------------------------------------------------
-# 13. Dispatch groups by watch
+# 9. Dispatch groups by watch
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_dispatch_groups_by_watch(patch_supabase, mock_supabase, test_settings):
@@ -335,130 +259,141 @@ async def test_dispatch_groups_by_watch(patch_supabase, mock_supabase, test_sett
 
     test_settings.notification_email_enabled = True
     test_settings.notification_email_recipients = "a@b.com"
-    test_settings.notification_slack_enabled = False
 
     # Use side_effect to return different data for successive .execute() calls
     mock_supabase.table.return_value.execute.side_effect = [
         MagicMock(data=SAMPLE_MATCHES_MULTI),  # watch_matches query
-        MagicMock(data=[                        # watches query
-            {"id": "w1", "name": "AWS Watch"},
-            {"id": "w2", "name": "IP Watch"},
-        ]),
+        MagicMock(
+            data=[  # watches query
+                {"id": "w1", "name": "AWS Watch"},
+                {"id": "w2", "name": "IP Watch"},
+            ]
+        ),
         MagicMock(data=[]),  # update for w1
         MagicMock(data=[]),  # update for w2
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True) as mock_send:
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True
+    ) as mock_send:
         await dispatch_pending_notifications()
 
         assert mock_send.call_count == 2
 
 
 # ---------------------------------------------------------------------------
-# 14. Dispatch marks notified on success
+# 10. Dispatch marks notified on success
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_dispatch_marks_notified_on_success(patch_supabase, mock_supabase, test_settings):
+async def test_dispatch_marks_notified_on_success(
+    patch_supabase, mock_supabase, test_settings
+):
     """Sets is_notified=True, notified_at."""
     from vigil.notifier import dispatch_pending_notifications
 
     test_settings.notification_email_enabled = True
     test_settings.notification_email_recipients = "a@b.com"
-    test_settings.notification_slack_enabled = False
 
     mock_supabase.table.return_value.execute.side_effect = [
-        MagicMock(data=SAMPLE_MATCHES),                   # watch_matches query
+        MagicMock(data=SAMPLE_MATCHES),  # watch_matches query
         MagicMock(data=[{"id": "w1", "name": "AWS Watch"}]),  # watches query
-        MagicMock(data=[]),                                # update
+        MagicMock(data=[]),  # update
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True):
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True
+    ):
         await dispatch_pending_notifications()
 
     # Verify update was called with is_notified=True
     update_calls = mock_supabase.table.return_value.update.call_args_list
-    found_update = any(
-        "is_notified" in str(c) for c in update_calls
-    )
+    found_update = any("is_notified" in str(c) for c in update_calls)
     assert found_update or mock_supabase.table.return_value.update.called
 
 
 # ---------------------------------------------------------------------------
-# 15. Dispatch no mark on failure
+# 11. Dispatch no mark on failure
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_dispatch_no_mark_on_failure(patch_supabase, mock_supabase, test_settings):
+async def test_dispatch_no_mark_on_failure(
+    patch_supabase, mock_supabase, test_settings
+):
     """Email fails -> is_notified stays False."""
     from vigil.notifier import dispatch_pending_notifications
 
     test_settings.notification_email_enabled = True
     test_settings.notification_email_recipients = "a@b.com"
-    test_settings.notification_slack_enabled = False
 
     mock_supabase.table.return_value.execute.side_effect = [
-        MagicMock(data=SAMPLE_MATCHES),                       # watch_matches query
+        MagicMock(data=SAMPLE_MATCHES),  # watch_matches query
         MagicMock(data=[{"id": "w1", "name": "AWS Watch"}]),  # watches query
-        MagicMock(data=[{}]),                                  # retry_count update
+        MagicMock(data=[{}]),  # retry_count update
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=False):
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=False
+    ):
         await dispatch_pending_notifications()
 
     # Update to is_notified=True should NOT have been called
     update_calls = mock_supabase.table.return_value.update.call_args_list
     notified_true_calls = [
-        c for c in update_calls
+        c
+        for c in update_calls
         if any("is_notified" in str(arg) and "True" in str(arg) for arg in c)
     ]
     assert len(notified_true_calls) == 0
 
 
 # ---------------------------------------------------------------------------
-# 16. Dispatch max 3 retries
+# 12. Dispatch retry_count >= 3 filtered by query
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_dispatch_max_3_retries(patch_supabase, mock_supabase, test_settings):
-    """retry_count >= 3 -> skip."""
+    """retry_count >= 3 is now filtered server-side via .lt('retry_count', 3).
+
+    Verify the query includes the lt filter. Since the mock's chainable
+    table mock returns empty by default, dispatch exits early with no sends.
+    """
     from vigil.notifier import dispatch_pending_notifications
 
-    match_with_retries = SAMPLE_MATCHES[0].copy()
-    match_with_retries["retry_count"] = 3
-
-    mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
-        data=[match_with_retries]
-    )
-
+    # The chainable mock already returns data=[] by default for execute(),
+    # so dispatch should exit after the query returns empty (the DB filtered
+    # out retry_count >= 3 rows).
     with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock) as mock_send:
         await dispatch_pending_notifications()
 
         mock_send.assert_not_called()
 
+    # Verify the lt filter was applied
+    lt_calls = mock_supabase.table.return_value.lt.call_args_list
+    found_lt = any(c[0] == ("retry_count", 3) for c in lt_calls)
+    assert found_lt, "Should filter retry_count < 3 in the Supabase query"
+
 
 # ---------------------------------------------------------------------------
-# 17. Dispatch respects settings
+# 13. Dispatch respects email settings
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_dispatch_respects_settings(patch_supabase, mock_supabase, test_settings):
-    """email_enabled=true, slack_enabled=false -> only email."""
+    """email_enabled=true, recipients set -> email sent."""
     from vigil.notifier import dispatch_pending_notifications
 
     test_settings.notification_email_enabled = True
-    test_settings.notification_slack_enabled = False
     test_settings.notification_email_recipients = "a@b.com"
-    test_settings.slack_webhook_url = "https://hooks.slack.com/xxx"
 
     mock_supabase.table.return_value.execute.side_effect = [
-        MagicMock(data=SAMPLE_MATCHES),                       # watch_matches query
+        MagicMock(data=SAMPLE_MATCHES),  # watch_matches query
         MagicMock(data=[{"id": "w1", "name": "AWS Watch"}]),  # watches query
-        MagicMock(data=[]),                                    # update
+        MagicMock(data=[]),  # update
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True) as mock_email, \
-         patch("vigil.notifier.send_slack_alert", new_callable=AsyncMock, return_value=True) as mock_slack:
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True
+    ) as mock_email:
         await dispatch_pending_notifications()
 
         mock_email.assert_called()
-        mock_slack.assert_not_called()
 
 
 # ============================================================================
@@ -467,7 +402,7 @@ async def test_dispatch_respects_settings(patch_supabase, mock_supabase, test_se
 
 
 # ---------------------------------------------------------------------------
-# 18. Admin alert sends email
+# 14. Admin alert sends email
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_admin_alert_sends_email(mock_smtp, test_settings):
@@ -475,7 +410,6 @@ async def test_admin_alert_sends_email(mock_smtp, test_settings):
     from vigil.notifier import send_admin_alert
 
     test_settings.notification_email_recipients = "admin@example.com"
-    test_settings.slack_webhook_url = ""
 
     await send_admin_alert("API Auth Failure", "Token expired")
 
@@ -486,46 +420,7 @@ async def test_admin_alert_sends_email(mock_smtp, test_settings):
 
 
 # ---------------------------------------------------------------------------
-# 19. Admin alert sends Slack
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_admin_alert_sends_slack(mock_slack_webhook, test_settings):
-    """Admin alert sends Slack message when webhook configured."""
-    from vigil.notifier import send_admin_alert
-
-    test_settings.notification_email_recipients = ""
-    test_settings.slack_webhook_url = "https://hooks.slack.com/test"
-    mock_slack_webhook.post.return_value = MagicMock(
-        status_code=200, is_success=True
-    )
-
-    await send_admin_alert("API Auth Failure", "Token expired")
-
-    mock_slack_webhook.post.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# 20. Admin alert sends both channels
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_admin_alert_sends_both(mock_smtp, mock_slack_webhook, test_settings):
-    """Admin alert sends both email and Slack when both configured."""
-    from vigil.notifier import send_admin_alert
-
-    test_settings.notification_email_recipients = "admin@example.com"
-    test_settings.slack_webhook_url = "https://hooks.slack.com/test"
-    mock_slack_webhook.post.return_value = MagicMock(
-        status_code=200, is_success=True
-    )
-
-    await send_admin_alert("API Auth Failure", "Token expired")
-
-    mock_smtp.send_message.assert_called_once()
-    mock_slack_webhook.post.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# 21. Admin alert email failure does not raise
+# 15. Admin alert email failure does not raise
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_admin_alert_email_failure_does_not_raise(mock_smtp, test_settings):
@@ -533,7 +428,6 @@ async def test_admin_alert_email_failure_does_not_raise(mock_smtp, test_settings
     from vigil.notifier import send_admin_alert
 
     test_settings.notification_email_recipients = "admin@example.com"
-    test_settings.slack_webhook_url = ""
     mock_smtp.send_message.side_effect = Exception("SMTP down")
 
     # Should not raise
@@ -546,7 +440,7 @@ async def test_admin_alert_email_failure_does_not_raise(mock_smtp, test_settings
 
 
 # ---------------------------------------------------------------------------
-# 22. Dispatch increments retry_count on failure
+# 16. Dispatch increments retry_count on failure
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_dispatch_increments_retry_count_on_failure(
@@ -557,23 +451,21 @@ async def test_dispatch_increments_retry_count_on_failure(
 
     test_settings.notification_email_enabled = True
     test_settings.notification_email_recipients = "a@b.com"
-    test_settings.notification_slack_enabled = False
 
     mock_supabase.table.return_value.execute.side_effect = [
-        MagicMock(data=SAMPLE_MATCHES),                       # watch_matches query
+        MagicMock(data=SAMPLE_MATCHES),  # watch_matches query
         MagicMock(data=[{"id": "w1", "name": "AWS Watch"}]),  # watches query
-        MagicMock(data=[{}]),                                  # retry_count update
+        MagicMock(data=[{}]),  # retry_count update
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=False):
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=False
+    ):
         await dispatch_pending_notifications()
 
     # Verify retry_count was incremented via update call
     update_calls = mock_supabase.table.return_value.update.call_args_list
-    retry_updates = [
-        c for c in update_calls
-        if "retry_count" in str(c)
-    ]
+    retry_updates = [c for c in update_calls if "retry_count" in str(c)]
     assert len(retry_updates) >= 1
 
 
@@ -583,7 +475,7 @@ async def test_dispatch_increments_retry_count_on_failure(
 
 
 # ---------------------------------------------------------------------------
-# 18. Daily digest content
+# 17. Daily digest content
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_daily_digest_content(patch_supabase, mock_supabase, test_settings):
@@ -595,24 +487,30 @@ async def test_daily_digest_content(patch_supabase, mock_supabase, test_settings
 
     mock_supabase.table.return_value.execute.side_effect = [
         MagicMock(data=SAMPLE_MATCHES_FIVE),  # watch_matches gte query
-        MagicMock(data=[                       # watches query
-            {"id": "w1", "name": "AWS Watch"},
-            {"id": "w2", "name": "IP Watch"},
-        ]),
+        MagicMock(
+            data=[  # watches query
+                {"id": "w1", "name": "AWS Watch"},
+                {"id": "w2", "name": "IP Watch"},
+            ]
+        ),
     ]
 
-    with patch("vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True) as mock_email:
+    with patch(
+        "vigil.notifier.send_email_alert", new_callable=AsyncMock, return_value=True
+    ) as mock_email:
         await send_daily_digest()
 
         mock_email.assert_called()
         # Should include summary of all matches
         call_args = mock_email.call_args
-        matches_arg = call_args[0][1] if call_args[0] else call_args[1].get("matches", [])
+        matches_arg = (
+            call_args[0][1] if call_args[0] else call_args[1].get("matches", [])
+        )
         assert len(matches_arg) >= 1
 
 
 # ---------------------------------------------------------------------------
-# 19. Daily digest disabled
+# 18. Daily digest disabled
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_daily_digest_disabled(patch_supabase, mock_supabase, test_settings):

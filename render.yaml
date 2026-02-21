@@ -3,7 +3,7 @@ services:
     name: vigil-worker
     runtime: docker
     region: singapore
-    plan: starter
+    plan: standard
     dockerfilePath: ./apps/worker/Dockerfile
     dockerContext: ./apps/worker
     envVars:
@@ -22,8 +22,6 @@ services:
       - key: VIGIL_SMTP_PASSWORD
         sync: false
       - key: VIGIL_SMTP_FROM_EMAIL
-        sync: false
-      - key: VIGIL_SLACK_WEBHOOK_URL
         sync: false
       - key: VIGIL_POLLING_ENABLED
         value: "true"

@@ -10,6 +10,7 @@ from vigil.polling import (
     check_poll_requests,
     poll_cycle,
     poll_single_watch,
+    sc_scrape_for_watch,
     setup_scheduler,
 )
 
@@ -455,6 +456,7 @@ class TestCheckPollRequests:
         }
 
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
             MagicMock(data=[poll_req]),  # fetch pending
             MagicMock(data=[{}]),  # update processing
             MagicMock(data=sample_watch_entity),  # fetch watch
@@ -482,6 +484,7 @@ class TestCheckPollRequests:
         }
 
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
             MagicMock(data=[poll_req]),  # fetch pending
             MagicMock(data=[{}]),  # update processing
             MagicMock(data=sample_watch_entity),  # fetch watch
@@ -501,9 +504,10 @@ class TestCheckPollRequests:
 
     async def test_ignores_when_no_pending(self, patch_supabase):
         """No pending requests -> no polling."""
-        patch_supabase.table.return_value.execute.return_value = MagicMock(
-            data=[]
-        )
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
+            MagicMock(data=[]),  # fetch pending (empty)
+        ]
 
         with patch(
             "vigil.polling.poll_single_watch", new_callable=AsyncMock
@@ -525,6 +529,7 @@ class TestCheckPollRequests:
         }
 
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
             MagicMock(data=[poll_req]),  # fetch pending
             MagicMock(data=[{}]),  # update processing
             MagicMock(data=sample_watch_entity),  # fetch watch
@@ -568,6 +573,7 @@ class TestCheckPollRequests:
         }
 
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
             MagicMock(data=[poll_req]),  # fetch pending
             MagicMock(data=[{}]),  # update processing
             MagicMock(data=delhi_watch),  # fetch watch
@@ -602,6 +608,7 @@ class TestCheckPollRequests:
         }
 
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),  # stale cleanup
             MagicMock(data=[poll_req]),  # fetch pending
             MagicMock(data=[{}]),  # update processing
             MagicMock(data=sample_watch_entity),  # fetch watch
@@ -623,6 +630,82 @@ class TestCheckPollRequests:
 
         mock_ik_poll.assert_called_once()
         mock_sc_scrape.assert_not_called()
+
+    async def test_stale_processing_requests_marked_failed(self, patch_supabase):
+        """Requests stuck in 'processing' for >5 min should be marked 'failed'."""
+        stale_req = {
+            "id": "pr-stale",
+            "watch_id": "w1",
+            "status": "processing",
+            "created_at": "2026-02-21T09:00:00+00:00",
+        }
+
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[stale_req]),  # stale cleanup returns updated rows
+            MagicMock(data=[]),  # fetch pending (empty)
+        ]
+
+        with patch(
+            "vigil.polling.poll_single_watch", new_callable=AsyncMock
+        ) as mock_poll:
+            await check_poll_requests()
+
+        # Stale cleanup should have called update with "failed"
+        update_calls = patch_supabase.table.return_value.update.call_args_list
+        assert any("failed" in str(c) for c in update_calls)
+        mock_poll.assert_not_called()
+
+
+# ============================================================================
+# sc_scrape_for_watch
+# ============================================================================
+
+
+@pytest.mark.unit
+class TestScScrapeForWatch:
+    """Tests for sc_scrape_for_watch — timeout and error handling."""
+
+    async def test_timeout_returns_empty(self, patch_supabase, test_settings):
+        """sc_scrape_for_watch should return [] on timeout."""
+        import asyncio
+
+        watch = {
+            "id": "w-sc",
+            "name": "SC Watch",
+            "watch_type": "entity",
+            "query_terms": "test",
+            "court_filter": ["supremecourt"],
+        }
+
+        with patch(
+            "vigil.polling._sc_scrape_for_watch_inner",
+            new_callable=AsyncMock,
+            side_effect=asyncio.TimeoutError,
+        ):
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
+
+    async def test_captcha_error_returns_empty(self, patch_supabase, test_settings):
+        """sc_scrape_for_watch should return [] on SCCaptchaError."""
+        from vigil.sc_client import SCCaptchaError
+
+        watch = {
+            "id": "w-sc",
+            "name": "SC Watch",
+            "watch_type": "entity",
+            "query_terms": "test",
+            "court_filter": ["supremecourt"],
+        }
+
+        with patch(
+            "vigil.polling._sc_scrape_for_watch_inner",
+            new_callable=AsyncMock,
+            side_effect=SCCaptchaError("All attempts failed"),
+        ):
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
 
 
 # ============================================================================

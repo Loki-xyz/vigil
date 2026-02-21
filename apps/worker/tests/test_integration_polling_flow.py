@@ -106,11 +106,13 @@ class TestFullPollingCycle:
         }
 
         # Sequential execute calls:
+        # 0. stale request cleanup (update status=failed where processing >5min)
         # 1. fetch pending poll_requests
         # 2. mark as processing
         # 3. fetch watch via .single() (returns dict, not list)
         # 4. mark as done
         patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[]),              # stale request cleanup (none found)
             MagicMock(data=[poll_request]),  # pending poll requests
             MagicMock(data=[{}]),            # update status=processing
             MagicMock(data=watch),           # fetch watch (.single())

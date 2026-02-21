@@ -17,7 +17,6 @@ DESIGN PRINCIPLES (mirroring ik_client.py):
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
 import re
@@ -26,8 +25,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
 
+import cv2
 import fitz  # PyMuPDF
 import httpx
+import numpy as np
 import pytesseract
 from bs4 import BeautifulSoup
 from PIL import Image, ImageFilter, ImageOps
@@ -83,17 +84,46 @@ class _PreprocessConfig:
     invert: bool = False
     sharpen: bool = False
     psm: int = 7
+    adaptive_threshold: bool = False
+    blur_type: str = "median"       # "median" | "gaussian" | "none"
+    morph_close: bool = True        # fill small gaps in digit strokes
+    morph_open: bool = False        # remove salt-and-pepper noise dots
 
 
+# Strategies ordered by expected reliability. Top 3 run in parallel.
 _PREPROCESS_STRATEGIES = [
-    _PreprocessConfig("default", threshold=140, contrast_cutoff=5, upscale=3),
-    _PreprocessConfig("high_thresh", threshold=180, contrast_cutoff=3, upscale=3),
-    _PreprocessConfig("low_thresh", threshold=100, contrast_cutoff=8, upscale=3),
-    _PreprocessConfig("inverted", threshold=140, contrast_cutoff=5, upscale=3, invert=True),
-    _PreprocessConfig("sharpen_4x", threshold=140, contrast_cutoff=5, upscale=4, sharpen=True),
-    _PreprocessConfig("psm6", threshold=140, contrast_cutoff=5, upscale=3, psm=6),
-    _PreprocessConfig("high_contrast", threshold=160, contrast_cutoff=0, upscale=3),
+    # --- Parallel batch (Group A) ---
+    _PreprocessConfig(
+        "adaptive_morph", threshold=0, contrast_cutoff=5, upscale=3,
+        adaptive_threshold=True, morph_close=True, blur_type="gaussian",
+    ),
+    _PreprocessConfig(
+        "default_morph", threshold=140, contrast_cutoff=5, upscale=3,
+        morph_close=True, blur_type="gaussian",
+    ),
+    _PreprocessConfig(
+        "high_thresh_morph", threshold=180, contrast_cutoff=3, upscale=3,
+        morph_close=True,
+    ),
+    # --- Sequential fallbacks (Group B) ---
+    _PreprocessConfig(
+        "inverted_adaptive", threshold=0, contrast_cutoff=5, upscale=3,
+        invert=True, adaptive_threshold=True, morph_close=True,
+    ),
+    _PreprocessConfig(
+        "low_thresh_sharp", threshold=100, contrast_cutoff=8, upscale=4,
+        sharpen=True, morph_close=True, morph_open=True,
+    ),
+    _PreprocessConfig(
+        "high_contrast_clean", threshold=160, contrast_cutoff=0, upscale=3,
+        morph_close=True, morph_open=True, blur_type="gaussian",
+    ),
 ]
+
+_PARALLEL_BATCH_SIZE = 3
+
+# Module-level strategy success tracking (resets on process restart).
+_strategy_success_counts: dict[str, int] = {s.name: 0 for s in _PREPROCESS_STRATEGIES}
 
 
 # ---------------------------------------------------------------------------
@@ -214,29 +244,93 @@ class SCClient:
         resp.raise_for_status()
         return resp.content
 
-    def _solve_math_captcha(self, image_bytes: bytes) -> int:
+    def _get_ordered_strategies(self) -> list[_PreprocessConfig]:
+        """Return strategies ordered by historical success rate."""
+        return sorted(
+            _PREPROCESS_STRATEGIES,
+            key=lambda s: _strategy_success_counts.get(s.name, 0),
+            reverse=True,
+        )
+
+    async def _solve_math_captcha(self, image_bytes: bytes) -> int:
         """
         OCR the captcha image and solve the math expression.
 
-        Tries multiple preprocessing strategies until one yields a parseable
-        math expression. Falls through strategies in order of likelihood.
+        Two-phase approach for speed + reliability:
+          Phase 1: Run top 3 strategies in parallel. If any yields a
+                   high-confidence (>80) parseable result, return immediately.
+          Phase 2: Run remaining strategies sequentially, collecting all
+                   parseable candidates. Pick highest confidence.
 
         Returns the integer answer.
         Raises SCCaptchaError if no strategy can parse the expression.
         """
+        strategies = self._get_ordered_strategies()
+        parallel_batch = strategies[:_PARALLEL_BATCH_SIZE]
+        sequential_batch = strategies[_PARALLEL_BATCH_SIZE:]
+
+        candidates: list[tuple[float, int, str, str]] = []  # (conf, answer, name, text)
         last_text = ""
-        for config in _PREPROCESS_STRATEGIES:
+
+        # Phase 1: parallel batch
+        tasks = [
+            self._ocr_with_config(image_bytes, cfg)
+            for cfg in parallel_batch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for cfg, result in zip(parallel_batch, results):
+            if isinstance(result, Exception):
+                continue
+            text, confidence = result
+            last_text = text
             try:
-                text = self._ocr_with_config(image_bytes, config)
                 answer = self._parse_math_expression(text)
                 logger.debug(
-                    "Captcha solved with strategy %r: text=%r, answer=%d",
-                    config.name, text, answer,
+                    "Captcha candidate from %r: text=%r, conf=%.1f, answer=%d",
+                    cfg.name, text, confidence, answer,
                 )
-                return answer
+                if confidence > 80:
+                    _strategy_success_counts[cfg.name] = (
+                        _strategy_success_counts.get(cfg.name, 0) + 1
+                    )
+                    return answer
+                candidates.append((confidence, answer, cfg.name, text))
             except SCCaptchaError:
-                last_text = text
                 continue
+
+        # Phase 2: sequential fallbacks
+        for cfg in sequential_batch:
+            try:
+                text, confidence = await self._ocr_with_config(image_bytes, cfg)
+                last_text = text
+                answer = self._parse_math_expression(text)
+                logger.debug(
+                    "Captcha candidate from %r: text=%r, conf=%.1f, answer=%d",
+                    cfg.name, text, confidence, answer,
+                )
+                if confidence > 80:
+                    _strategy_success_counts[cfg.name] = (
+                        _strategy_success_counts.get(cfg.name, 0) + 1
+                    )
+                    return answer
+                candidates.append((confidence, answer, cfg.name, text))
+            except SCCaptchaError:
+                continue
+
+        # Pick best candidate by confidence
+        if candidates:
+            candidates.sort(reverse=True)
+            best_conf, best_answer, best_name, best_text = candidates[0]
+            logger.info(
+                "Captcha solved (best of %d candidates): strategy=%r, "
+                "text=%r, conf=%.1f, answer=%d",
+                len(candidates), best_name, best_text, best_conf, best_answer,
+            )
+            _strategy_success_counts[best_name] = (
+                _strategy_success_counts.get(best_name, 0) + 1
+            )
+            return best_answer
 
         # All strategies failed
         self._log_captcha_failure(image_bytes, last_text)
@@ -245,34 +339,110 @@ class SCClient:
             f"strategies. Last OCR text: {last_text!r}"
         )
 
-    def _ocr_with_config(self, image_bytes: bytes, config: _PreprocessConfig) -> str:
-        """Apply a specific preprocessing config and return OCR text."""
-        img = Image.open(BytesIO(image_bytes))
-        img = img.convert("L")
+    async def _ocr_with_config(
+        self, image_bytes: bytes, config: _PreprocessConfig,
+    ) -> tuple[str, float]:
+        """Apply a specific preprocessing config and return (text, confidence).
 
-        if config.contrast_cutoff > 0:
-            img = ImageOps.autocontrast(img, cutoff=config.contrast_cutoff)
+        Revised pipeline (optimised ordering):
+          1. Grayscale + autocontrast
+          2. Optional invert
+          3. Upscale (before threshold — preserves subpixel info for LANCZOS)
+          4. Blur (smooth upscale artifacts before binarisation)
+          5. Threshold (global or adaptive via OpenCV)
+          6. Morphological operations (on binary image)
+          7. Optional sharpen
+          8. 10px white border (Tesseract best practice)
+          9. OCR with confidence scoring
 
-        if config.invert:
-            img = ImageOps.invert(img)
+        Runs Tesseract in a background thread with configurable timeout.
+        """
+        ocr_timeout = settings.sc_captcha_ocr_timeout
 
-        if config.threshold > 0:
-            img = img.point(lambda x: 255 if x > config.threshold else 0)
+        def _do_ocr() -> tuple[str, float]:
+            img = Image.open(BytesIO(image_bytes))
+            img = img.convert("L")
 
-        img = img.resize(
-            (img.width * config.upscale, img.height * config.upscale),
-            Image.LANCZOS,
-        )
-        img = img.filter(ImageFilter.MedianFilter(3))
+            # 1. Auto-contrast
+            if config.contrast_cutoff > 0:
+                img = ImageOps.autocontrast(img, cutoff=config.contrast_cutoff)
 
-        if config.sharpen:
-            img = img.filter(ImageFilter.SHARPEN)
+            # 2. Optional invert
+            if config.invert:
+                img = ImageOps.invert(img)
 
-        text = pytesseract.image_to_string(
-            img,
-            config=f"--psm {config.psm} -c tessedit_char_whitelist=0123456789+-xX*=? ",
-        )
-        return text.strip()
+            # 3. Upscale FIRST (preserves subpixel info for LANCZOS)
+            img = img.resize(
+                (img.width * config.upscale, img.height * config.upscale),
+                Image.LANCZOS,
+            )
+
+            # 4. Blur (before threshold to smooth upscale artifacts)
+            if config.blur_type == "gaussian":
+                img = img.filter(ImageFilter.GaussianBlur(radius=1))
+            elif config.blur_type == "median":
+                img = img.filter(ImageFilter.MedianFilter(3))
+
+            # 5. Threshold (after upscale + blur)
+            img_array = np.array(img, dtype=np.uint8)
+            if config.adaptive_threshold:
+                img_array = cv2.adaptiveThreshold(
+                    img_array, 255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    blockSize=11,
+                    C=2,
+                )
+            elif config.threshold > 0:
+                _, img_array = cv2.threshold(
+                    img_array, config.threshold, 255, cv2.THRESH_BINARY,
+                )
+
+            # 6. Morphological operations (on binary image)
+            if config.morph_close:
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+                img_array = cv2.morphologyEx(img_array, cv2.MORPH_CLOSE, kernel)
+            if config.morph_open:
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+                img_array = cv2.morphologyEx(img_array, cv2.MORPH_OPEN, kernel)
+
+            # 7. Optional sharpen
+            img = Image.fromarray(img_array)
+            if config.sharpen:
+                img = img.filter(ImageFilter.SHARPEN)
+
+            # 8. 10px white border (Tesseract best practice for tight crops)
+            img = ImageOps.expand(img, border=10, fill=255)
+
+            # 9. OCR with confidence scoring
+            tess_config = (
+                f"--psm {config.psm} "
+                '-c tessedit_char_whitelist="0123456789 +-xX*=?"'
+            )
+            data = pytesseract.image_to_data(
+                img, config=tess_config, output_type=pytesseract.Output.DICT,
+            )
+            confidences = [
+                int(c) for c, t in zip(data["conf"], data["text"])
+                if t.strip() and int(c) > 0
+            ]
+            avg_conf = (
+                sum(confidences) / len(confidences) if confidences else 0.0
+            )
+            text = " ".join(t for t in data["text"] if t.strip())
+            return text.strip(), avg_conf
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_do_ocr),
+                timeout=ocr_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Tesseract OCR timed out after %.1fs with strategy %r",
+                ocr_timeout, config.name,
+            )
+            raise SCCaptchaError(f"OCR timed out with strategy {config.name!r}")
 
     @staticmethod
     def _parse_math_expression(text: str) -> int:
@@ -473,7 +643,7 @@ class SCClient:
                 image_bytes = await self._fetch_captcha_image(captcha_url, cookies)
 
                 # Step 3: Solve captcha
-                answer = self._solve_math_captcha(image_bytes)
+                answer = await self._solve_math_captcha(image_bytes)
                 logger.info(
                     "Captcha attempt %d/%d: solved answer=%d",
                     attempt + 1, self._captcha_max_attempts, answer,

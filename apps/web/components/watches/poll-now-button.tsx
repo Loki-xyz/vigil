@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { supabase } from "@/lib/supabase/client"
 import type { PollRequest, PollRequestStatus } from "@/lib/supabase/types"
@@ -8,9 +8,32 @@ import { Button } from "@/components/ui/button"
 import { Loader2, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 
+const POLL_TIMEOUT_MS = 3 * 60 * 1000 // 3 minutes
+
 export function PollNowButton({ watchId }: { watchId: string }) {
   const [status, setStatus] = useState<PollRequestStatus | null>(null)
   const queryClient = useQueryClient()
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+
+  // Clean up timeout and channel on unmount
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      if (channelRef.current) supabase.removeChannel(channelRef.current)
+    }
+  }, [])
+
+  const cleanup = () => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
+    }
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current)
+      channelRef.current = null
+    }
+  }
 
   const pollMutation = useMutation({
     mutationFn: async () => {
@@ -46,15 +69,24 @@ export function PollNowButton({ watchId }: { watchId: string }) {
                 queryKey: ["dashboard"],
               })
               setStatus(null)
-              supabase.removeChannel(channel)
+              cleanup()
             } else if (newStatus === "failed") {
               toast.error("Poll failed")
               setStatus(null)
-              supabase.removeChannel(channel)
+              cleanup()
             }
           }
         )
         .subscribe()
+
+      channelRef.current = channel
+
+      // Client-side timeout: if no response within 3 minutes, reset
+      timeoutRef.current = setTimeout(() => {
+        toast.error("Poll timed out — the worker may be busy. Try again later.")
+        setStatus(null)
+        cleanup()
+      }, POLL_TIMEOUT_MS)
     },
     onError: () => {
       toast.error("Failed to start poll")

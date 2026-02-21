@@ -47,6 +47,7 @@ function renderWithQuery(ui: React.ReactElement) {
 
 describe("PollNowButton", () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     mockFrom.mockReturnValue({
       insert: vi.fn().mockReturnValue({
         select: vi.fn().mockReturnValue({
@@ -57,6 +58,10 @@ describe("PollNowButton", () => {
         }),
       }),
     })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it("renders 'Poll Now' button text", () => {
@@ -71,10 +76,17 @@ describe("PollNowButton", () => {
   })
 
   it("calls supabase.from('poll_requests') with insert when clicked", async () => {
+    vi.useRealTimers()
     const user = userEvent.setup()
     renderWithQuery(<PollNowButton watchId="w1" />)
     const button = screen.getByRole("button", { name: /Poll Now/ })
     await user.click(button)
     expect(mockFrom).toHaveBeenCalledWith("poll_requests")
+  })
+
+  it("cleans up channel on unmount", () => {
+    const { unmount } = renderWithQuery(<PollNowButton watchId="w1" />)
+    unmount()
+    // Should not throw
   })
 })

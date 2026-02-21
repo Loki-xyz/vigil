@@ -127,50 +127,123 @@ class TestParseMathExpression:
 
 
 class TestSolveMathCaptcha:
-    """Tests for _solve_math_captcha with multi-strategy OCR."""
+    """Tests for _solve_math_captcha with parallel + confidence-based selection."""
 
-    def test_first_strategy_succeeds(self):
+    async def test_high_confidence_parallel_returns_immediately(self):
+        """When a parallel-batch strategy returns >80 confidence, use it."""
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        with patch.object(client, "_ocr_with_config", return_value="3 + 5 = ?"):
-            result = client._solve_math_captcha(image_bytes)
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("3 + 5 = ?", 95.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
         assert result == 8
 
-    def test_fallback_to_later_strategy(self):
+    async def test_low_confidence_picks_best_candidate(self):
+        """When all strategies return low confidence, pick the highest."""
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        # First two strategies return garbled text, third succeeds
+        # Return parseable results with varying confidence — all below 80
         with patch.object(
-            client, "_ocr_with_config",
-            side_effect=["garbled", "also garbled", "6 x 3 = ?"]
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            side_effect=[
+                ("3 + 5 = ?", 60.0),   # answer=8, conf=60
+                ("6 x 3 = ?", 75.0),   # answer=18, conf=75 (best)
+                ("1 + 1 = ?", 50.0),   # answer=2, conf=50
+                ("4 + 2 = ?", 70.0),   # answer=6, conf=70
+                ("2 + 3 = ?", 65.0),   # answer=5, conf=65
+                ("9 - 1 = ?", 55.0),   # answer=8, conf=55
+            ],
         ):
-            result = client._solve_math_captcha(image_bytes)
+            result = await client._solve_math_captcha(image_bytes)
+        # Should pick conf=75 → answer=18
         assert result == 18
 
-    def test_all_strategies_fail_raises(self):
+    async def test_fallback_to_sequential_strategies(self):
+        """When parallel batch fails, sequential strategies are tried."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        # Parallel batch (3): garbled, then sequential succeeds
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            side_effect=[
+                ("garbled", 10.0),
+                ("also garbled", 15.0),
+                ("nope", 5.0),
+                ("6 x 3 = ?", 90.0),  # Sequential strategy succeeds with high conf
+            ],
+        ):
+            result = await client._solve_math_captcha(image_bytes)
+        assert result == 18
+
+    async def test_all_strategies_fail_raises(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
         with (
-            patch.object(client, "_ocr_with_config", return_value="garbled"),
+            patch.object(
+                client, "_ocr_with_config", new_callable=AsyncMock,
+                return_value=("garbled", 10.0),
+            ),
             patch.object(client, "_log_captcha_failure") as mock_log,
         ):
             with pytest.raises(SCCaptchaError, match="strategies"):
-                client._solve_math_captcha(image_bytes)
+                await client._solve_math_captcha(image_bytes)
             mock_log.assert_called_once()
 
-    def test_subtraction(self):
+    async def test_subtraction(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        with patch.object(client, "_ocr_with_config", return_value="12 - 4 = ?"):
-            result = client._solve_math_captcha(image_bytes)
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("12 - 4 = ?", 90.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
         assert result == 8
 
-    def test_multiplication_with_asterisk(self):
+    async def test_multiplication_with_asterisk(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        with patch.object(client, "_ocr_with_config", return_value="7 * 2 = ?"):
-            result = client._solve_math_captcha(image_bytes)
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("7 * 2 = ?", 85.0),
+        ):
+            result = await client._solve_math_captcha(image_bytes)
         assert result == 14
+
+    async def test_ocr_exception_in_parallel_batch_skipped(self):
+        """If some parallel strategies raise exceptions, others still work."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            side_effect=[
+                SCCaptchaError("timeout"),    # parallel 1 fails
+                ("5 + 3 = ?", 90.0),          # parallel 2 succeeds
+                SCCaptchaError("timeout"),    # parallel 3 fails
+            ],
+        ):
+            result = await client._solve_math_captcha(image_bytes)
+        assert result == 8
+
+    async def test_strategy_success_tracking(self):
+        """Successful strategies should increment their success counters."""
+        from vigil.sc_client import _strategy_success_counts
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+
+        # Reset counters
+        for k in _strategy_success_counts:
+            _strategy_success_counts[k] = 0
+
+        with patch.object(
+            client, "_ocr_with_config", new_callable=AsyncMock,
+            return_value=("3 + 5 = ?", 95.0),
+        ):
+            await client._solve_math_captcha(image_bytes)
+
+        # At least one strategy should have been incremented
+        assert sum(_strategy_success_counts.values()) >= 1
 
 
 # ── Captcha Rejection Detection ──────────────────────────
@@ -217,58 +290,182 @@ class TestCaptchaRejection:
 # ── OCR With Config ──────────────────────────────────────
 
 
-class TestOcrWithConfig:
-    """Tests for _ocr_with_config preprocessing pipeline."""
+def _mock_tess_data(text: str, confidence: int = 90) -> dict:
+    """Build a pytesseract.image_to_data DICT result for the given text."""
+    words = text.split()
+    return {
+        "text": ["", *words, ""],  # Tesseract includes empties
+        "conf": ["-1", *([str(confidence)] * len(words)), "-1"],
+    }
 
-    def test_default_strategy(self):
+
+class TestOcrWithConfig:
+    """Tests for _ocr_with_config preprocessing pipeline (returns text + confidence)."""
+
+    async def test_default_strategy(self):
         from vigil.sc_client import _PreprocessConfig
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
         config = _PreprocessConfig("test", threshold=140, contrast_cutoff=5, upscale=3)
 
         with patch("vigil.sc_client.pytesseract") as mock_tess:
-            mock_tess.image_to_string.return_value = "3 + 5 = ?"
-            result = client._ocr_with_config(image_bytes, config)
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("3 + 5 = ?", 92)
+            text, conf = await client._ocr_with_config(image_bytes, config)
 
-        assert result == "3 + 5 = ?"
-        mock_tess.image_to_string.assert_called_once()
+        assert text == "3 + 5 = ?"
+        assert conf == 92.0
+        mock_tess.image_to_data.assert_called_once()
 
-    def test_inverted_strategy(self):
+    async def test_inverted_strategy(self):
         from vigil.sc_client import _PreprocessConfig
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        config = _PreprocessConfig("test_inv", threshold=140, contrast_cutoff=5, upscale=3, invert=True)
+        config = _PreprocessConfig(
+            "test_inv", threshold=140, contrast_cutoff=5, upscale=3, invert=True,
+        )
 
         with patch("vigil.sc_client.pytesseract") as mock_tess:
-            mock_tess.image_to_string.return_value = "7 - 2 = ?"
-            result = client._ocr_with_config(image_bytes, config)
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("7 - 2 = ?", 85)
+            text, conf = await client._ocr_with_config(image_bytes, config)
 
-        assert result == "7 - 2 = ?"
+        assert text == "7 - 2 = ?"
+        assert conf == 85.0
 
-    def test_sharpen_strategy(self):
+    async def test_sharpen_strategy(self):
         from vigil.sc_client import _PreprocessConfig
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        config = _PreprocessConfig("test_sharp", threshold=140, contrast_cutoff=5, upscale=4, sharpen=True)
+        config = _PreprocessConfig(
+            "test_sharp", threshold=140, contrast_cutoff=5, upscale=4, sharpen=True,
+        )
 
         with patch("vigil.sc_client.pytesseract") as mock_tess:
-            mock_tess.image_to_string.return_value = "4 x 2 = ?"
-            result = client._ocr_with_config(image_bytes, config)
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("4 x 2 = ?", 88)
+            text, conf = await client._ocr_with_config(image_bytes, config)
 
-        assert result == "4 x 2 = ?"
+        assert text == "4 x 2 = ?"
+        assert conf == 88.0
 
-    def test_psm6_strategy(self):
+    async def test_psm6_strategy(self):
         from vigil.sc_client import _PreprocessConfig
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         image_bytes = _make_captcha_image_bytes()
-        config = _PreprocessConfig("test_psm6", threshold=140, contrast_cutoff=5, upscale=3, psm=6)
+        config = _PreprocessConfig(
+            "test_psm6", threshold=140, contrast_cutoff=5, upscale=3, psm=6,
+        )
 
         with patch("vigil.sc_client.pytesseract") as mock_tess:
-            mock_tess.image_to_string.return_value = "9 + 1 = ?"
-            client._ocr_with_config(image_bytes, config)
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("9 + 1 = ?", 80)
+            await client._ocr_with_config(image_bytes, config)
 
-        call_args = mock_tess.image_to_string.call_args
+        call_args = mock_tess.image_to_data.call_args
         assert "--psm 6" in call_args[1]["config"]
+
+    async def test_adaptive_threshold_strategy(self):
+        """Adaptive threshold config is accepted without error."""
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig(
+            "test_adaptive", threshold=0, contrast_cutoff=5, upscale=3,
+            adaptive_threshold=True, morph_close=True, blur_type="gaussian",
+        )
+
+        with patch("vigil.sc_client.pytesseract") as mock_tess:
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("5 + 3 = ?", 91)
+            text, conf = await client._ocr_with_config(image_bytes, config)
+
+        assert text == "5 + 3 = ?"
+        assert conf == 91.0
+
+    async def test_morph_open_and_close(self):
+        """Both morphological operations can be enabled together."""
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig(
+            "test_morph", threshold=100, contrast_cutoff=8, upscale=4,
+            morph_close=True, morph_open=True, sharpen=True,
+        )
+
+        with patch("vigil.sc_client.pytesseract") as mock_tess:
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("2 + 7 = ?", 87)
+            text, conf = await client._ocr_with_config(image_bytes, config)
+
+        assert text == "2 + 7 = ?"
+
+    async def test_gaussian_blur_option(self):
+        """Gaussian blur type is accepted without error."""
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig(
+            "test_gauss", threshold=140, contrast_cutoff=5, upscale=3,
+            blur_type="gaussian",
+        )
+
+        with patch("vigil.sc_client.pytesseract") as mock_tess:
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("8 - 3 = ?", 93)
+            text, conf = await client._ocr_with_config(image_bytes, config)
+
+        assert text == "8 - 3 = ?"
+
+    async def test_no_blur_option(self):
+        """blur_type='none' skips filtering."""
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig(
+            "test_noblur", threshold=140, contrast_cutoff=5, upscale=3,
+            blur_type="none",
+        )
+
+        with patch("vigil.sc_client.pytesseract") as mock_tess:
+            mock_tess.Output.DICT = "dict"
+            mock_tess.image_to_data.return_value = _mock_tess_data("1 + 2 = ?", 70)
+            text, conf = await client._ocr_with_config(image_bytes, config)
+
+        assert text == "1 + 2 = ?"
+        assert conf == 70.0
+
+    async def test_low_confidence_returned(self):
+        """Confidence score is correctly computed from OCR data."""
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig("test", threshold=140, contrast_cutoff=5, upscale=3)
+
+        with patch("vigil.sc_client.pytesseract") as mock_tess:
+            mock_tess.Output.DICT = "dict"
+            # Mix of confidences: 30, 80, 50 → avg 53.3
+            mock_tess.image_to_data.return_value = {
+                "text": ["", "3", "+", "5", ""],
+                "conf": ["-1", "30", "80", "50", "-1"],
+            }
+            text, conf = await client._ocr_with_config(image_bytes, config)
+
+        assert text == "3 + 5"
+        assert abs(conf - 53.3) < 0.5
+
+    async def test_ocr_timeout_raises_captcha_error(self):
+        """When Tesseract hangs and times out, should raise SCCaptchaError."""
+        import asyncio
+        from vigil.sc_client import _PreprocessConfig
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        image_bytes = _make_captcha_image_bytes()
+        config = _PreprocessConfig("test", threshold=140, contrast_cutoff=5, upscale=3)
+
+        # Patch asyncio.wait_for to immediately timeout
+        with patch("vigil.sc_client.asyncio.wait_for", side_effect=asyncio.TimeoutError):
+            with pytest.raises(SCCaptchaError, match="timed out"):
+                await client._ocr_with_config(image_bytes, config)
 
 
 # ── HTML Table Parsing ───────────────────────────────────
@@ -391,7 +588,7 @@ class TestFetchDailyOrders:
             patch.object(client, "_rate_limit", new_callable=AsyncMock),
             patch.object(client._client, "get", new_callable=AsyncMock,
                         side_effect=[mock_responses[0], mock_responses[1], mock_responses[2]]),
-            patch.object(client, "_solve_math_captcha", return_value=8),
+            patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
             orders = await client.fetch_daily_orders(
                 date(2026, 2, 19), date(2026, 2, 21)
@@ -437,7 +634,7 @@ class TestFetchDailyOrders:
                             httpx.Response(200, content=captcha_image,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
                         ]),
-            patch.object(client, "_solve_math_captcha",
+            patch.object(client, "_solve_math_captcha", new_callable=AsyncMock,
                         side_effect=SCCaptchaError("Could not parse")),
         ):
             with pytest.raises(SCCaptchaError, match="Failed to solve captcha"):
@@ -484,7 +681,7 @@ class TestFetchDailyOrders:
                             httpx.Response(200, text=results_html,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
                         ]),
-            patch.object(client, "_solve_math_captcha", return_value=8),
+            patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
             orders = await client.fetch_daily_orders(
                 date(2026, 2, 19), date(2026, 2, 21)
@@ -522,7 +719,7 @@ class TestFetchDailyOrders:
                                 request=httpx.Request("GET", "https://test.sci.gov.in/"),
                             ),
                         ]),
-            patch.object(client, "_solve_math_captcha", return_value=8),
+            patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
             with pytest.raises(SCWebsiteUnavailableError):
                 await client.fetch_daily_orders(date(2026, 2, 19), date(2026, 2, 21))

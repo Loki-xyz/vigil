@@ -31,6 +31,7 @@ SCHEDULING:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -222,6 +223,26 @@ async def poll_cycle() -> None:
 
 async def check_poll_requests() -> None:
     """Check poll_requests table for pending 'Poll Now' requests."""
+    # Clean up stale "processing" requests (worker crashed or hung)
+    try:
+        stale_cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=5)
+        ).isoformat()
+        stale_resp = (
+            supabase.table("poll_requests")
+            .update({"status": "failed"})
+            .eq("status", "processing")
+            .lt("created_at", stale_cutoff)
+            .execute()
+        )
+        if stale_resp.data:
+            logger.warning(
+                "Marked %d stale poll request(s) as failed",
+                len(stale_resp.data),
+            )
+    except Exception:
+        logger.error("Failed to clean up stale poll requests", exc_info=True)
+
     resp = (
         supabase.table("poll_requests")
         .select("*")
@@ -418,6 +439,70 @@ async def sc_scrape_cycle() -> None:
         logger.error("Unexpected error in SC scrape cycle", exc_info=True)
 
 
+async def _sc_scrape_for_watch_inner(watch: dict) -> list[dict]:
+    """Inner implementation of SC scrape for a single watch (no timeout wrapper)."""
+    client = _get_sc_client()
+    from_date = (
+        datetime.now(timezone.utc) - timedelta(days=settings.sc_lookback_days)
+    ).date()
+    to_date = datetime.now(timezone.utc).date()
+
+    orders = await client.fetch_daily_orders(
+        from_date, to_date, watch_id=watch["id"],
+    )
+    logger.info(
+        "Poll Now SC scrape for watch %s fetched %d orders (%s to %s)",
+        watch["id"], len(orders), from_date, to_date,
+    )
+
+    if not orders:
+        return []
+
+    all_new_matches: list[dict] = []
+
+    for order in orders:
+        # Phase 1: Fast match on parties/case_number (no PDF)
+        result = match_order_against_watch(order, watch, full_text=None)
+        if result.is_match:
+            try:
+                matches = await process_sc_orders(
+                    watch["id"], [(order, result, "")],
+                )
+                all_new_matches.extend(matches)
+            except Exception:
+                logger.error(
+                    "Error processing SC order %s for watch %s",
+                    order.case_number, watch["id"], exc_info=True,
+                )
+            continue
+
+        # Phase 2: Download PDF if needed and re-match
+        if needs_pdf_download(order, [watch]) and settings.sc_pdf_download_enabled:
+            full_text: str | None = None
+            try:
+                full_text = await client.download_and_parse_pdf(order.pdf_url)
+            except SCPDFDownloadError:
+                logger.warning(
+                    "Failed to download PDF for %s", order.case_number,
+                )
+
+            if full_text:
+                result = match_order_against_watch(order, watch, full_text=full_text)
+                if result.is_match:
+                    try:
+                        matches = await process_sc_orders(
+                            watch["id"], [(order, result, full_text)],
+                        )
+                        all_new_matches.extend(matches)
+                    except Exception:
+                        logger.error(
+                            "Error processing SC order %s for watch %s",
+                            order.case_number, watch["id"], exc_info=True,
+                        )
+
+    return all_new_matches
+
+
 async def sc_scrape_for_watch(watch: dict) -> list[dict]:
     """
     Run SC website scrape and two-phase matching for a single watch.
@@ -427,67 +512,19 @@ async def sc_scrape_for_watch(watch: dict) -> list[dict]:
     Does NOT call dispatch_pending_notifications (the 10-min job handles that).
 
     Returns list of newly created watch_match dicts. Returns [] on any error.
+    Enforces a 3-minute overall timeout to prevent hanging.
     """
     try:
-        client = _get_sc_client()
-        from_date = (
-            datetime.now(timezone.utc) - timedelta(days=settings.sc_lookback_days)
-        ).date()
-        to_date = datetime.now(timezone.utc).date()
-
-        orders = await client.fetch_daily_orders(from_date, to_date)
-        logger.info(
-            "Poll Now SC scrape for watch %s fetched %d orders (%s to %s)",
-            watch["id"], len(orders), from_date, to_date,
+        return await asyncio.wait_for(
+            _sc_scrape_for_watch_inner(watch),
+            timeout=180.0,
         )
-
-        if not orders:
-            return []
-
-        all_new_matches: list[dict] = []
-
-        for order in orders:
-            # Phase 1: Fast match on parties/case_number (no PDF)
-            result = match_order_against_watch(order, watch, full_text=None)
-            if result.is_match:
-                try:
-                    matches = await process_sc_orders(
-                        watch["id"], [(order, result, "")],
-                    )
-                    all_new_matches.extend(matches)
-                except Exception:
-                    logger.error(
-                        "Error processing SC order %s for watch %s",
-                        order.case_number, watch["id"], exc_info=True,
-                    )
-                continue
-
-            # Phase 2: Download PDF if needed and re-match
-            if needs_pdf_download(order, [watch]) and settings.sc_pdf_download_enabled:
-                full_text: str | None = None
-                try:
-                    full_text = await client.download_and_parse_pdf(order.pdf_url)
-                except SCPDFDownloadError:
-                    logger.warning(
-                        "Failed to download PDF for %s", order.case_number,
-                    )
-
-                if full_text:
-                    result = match_order_against_watch(order, watch, full_text=full_text)
-                    if result.is_match:
-                        try:
-                            matches = await process_sc_orders(
-                                watch["id"], [(order, result, full_text)],
-                            )
-                            all_new_matches.extend(matches)
-                        except Exception:
-                            logger.error(
-                                "Error processing SC order %s for watch %s",
-                                order.case_number, watch["id"], exc_info=True,
-                            )
-
-        return all_new_matches
-
+    except asyncio.TimeoutError:
+        logger.error(
+            "SC scrape for Poll Now watch %s timed out after 180s",
+            watch.get("id"),
+        )
+        return []
     except (SCCaptchaError, SCScraperError):
         logger.error(
             "SC scrape failed for Poll Now watch %s", watch.get("id"), exc_info=True,

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     sc_lookback_days: int = 2
     sc_pdf_download_enabled: bool = True
     sc_captcha_debug_dir: str = ""
+    sc_captcha_ocr_timeout: float = 10.0
     tesseract_cmd: str = "tesseract"
 
     # App

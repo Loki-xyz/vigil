@@ -290,6 +290,7 @@ def test_settings():
         mock_settings.sc_rate_limit_seconds = 0.01
         mock_settings.sc_lookback_days = 2
         mock_settings.sc_pdf_download_enabled = True
+        mock_settings.sc_captcha_debug_dir = ""
         mock_settings.tesseract_cmd = "tesseract"
         # Patch settings in modules that import it directly
         with (

@@ -105,9 +105,17 @@ class TestFullPollingCycle:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        patch_supabase.table.return_value.execute.return_value = MagicMock(
-            data=[poll_request]
-        )
+        # Sequential execute calls:
+        # 1. fetch pending poll_requests
+        # 2. mark as processing
+        # 3. fetch watch via .single() (returns dict, not list)
+        # 4. mark as done
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[poll_request]),  # pending poll requests
+            MagicMock(data=[{}]),            # update status=processing
+            MagicMock(data=watch),           # fetch watch (.single())
+            MagicMock(data=[{}]),            # update status=done
+        ]
 
         with patch("vigil.polling.poll_single_watch", new_callable=AsyncMock) as mock_poll:
             mock_poll.return_value = [{"id": "m1"}]

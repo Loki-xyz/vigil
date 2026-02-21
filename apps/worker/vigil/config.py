@@ -45,10 +45,11 @@ class Settings(BaseSettings):
     sc_base_url: str = "https://www.sci.gov.in"
     sc_request_timeout_seconds: int = 60
     sc_max_retries: int = 3
-    sc_captcha_max_attempts: int = 3
+    sc_captcha_max_attempts: int = 5
     sc_rate_limit_seconds: float = 3.0
     sc_lookback_days: int = 2
     sc_pdf_download_enabled: bool = True
+    sc_captcha_debug_dir: str = ""
     tesseract_cmd: str = "tesseract"
 
     # App

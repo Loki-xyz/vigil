@@ -17,11 +17,13 @@ DESIGN PRINCIPLES (mirroring ik_client.py):
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 
 import fitz  # PyMuPDF
@@ -69,6 +71,29 @@ class SCOrderRecord:
     order_date: date | None
     pdf_url: str
     court: str = "Supreme Court of India"
+
+
+@dataclass
+class _PreprocessConfig:
+    """One preprocessing strategy for captcha OCR."""
+    name: str
+    threshold: int
+    contrast_cutoff: float
+    upscale: int
+    invert: bool = False
+    sharpen: bool = False
+    psm: int = 7
+
+
+_PREPROCESS_STRATEGIES = [
+    _PreprocessConfig("default", threshold=140, contrast_cutoff=5, upscale=3),
+    _PreprocessConfig("high_thresh", threshold=180, contrast_cutoff=3, upscale=3),
+    _PreprocessConfig("low_thresh", threshold=100, contrast_cutoff=8, upscale=3),
+    _PreprocessConfig("inverted", threshold=140, contrast_cutoff=5, upscale=3, invert=True),
+    _PreprocessConfig("sharpen_4x", threshold=140, contrast_cutoff=5, upscale=4, sharpen=True),
+    _PreprocessConfig("psm6", threshold=140, contrast_cutoff=5, upscale=3, psm=6),
+    _PreprocessConfig("high_contrast", threshold=160, contrast_cutoff=0, upscale=3),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -193,29 +218,71 @@ class SCClient:
         """
         OCR the captcha image and solve the math expression.
 
-        Uses Pillow for preprocessing + pytesseract for OCR.
-        Expects images like "3 + 5 = ?" or "12 - 4 = ?".
+        Tries multiple preprocessing strategies until one yields a parseable
+        math expression. Falls through strategies in order of likelihood.
 
         Returns the integer answer.
-        Raises SCCaptchaError if the expression cannot be parsed.
+        Raises SCCaptchaError if no strategy can parse the expression.
         """
-        img = Image.open(BytesIO(image_bytes))
+        last_text = ""
+        for config in _PREPROCESS_STRATEGIES:
+            try:
+                text = self._ocr_with_config(image_bytes, config)
+                answer = self._parse_math_expression(text)
+                logger.debug(
+                    "Captcha solved with strategy %r: text=%r, answer=%d",
+                    config.name, text, answer,
+                )
+                return answer
+            except SCCaptchaError:
+                last_text = text
+                continue
 
-        # Preprocessing pipeline
-        img = img.convert("L")
-        img = ImageOps.autocontrast(img, cutoff=5)
-        img = img.point(lambda x: 255 if x > 140 else 0)
-        img = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
-        img = img.filter(ImageFilter.MedianFilter(3))
-
-        # OCR with character whitelist
-        text = pytesseract.image_to_string(
-            img,
-            config="--psm 7 -c tessedit_char_whitelist=0123456789+-x*=? ",
+        # All strategies failed
+        self._log_captcha_failure(image_bytes, last_text)
+        raise SCCaptchaError(
+            f"Could not parse math from captcha after {len(_PREPROCESS_STRATEGIES)} "
+            f"strategies. Last OCR text: {last_text!r}"
         )
 
-        # Parse: "3 + 5 = ?" or "12 - 4 ="
-        match = re.search(r"(\d+)\s*([+\-x*])\s*(\d+)", text)
+    def _ocr_with_config(self, image_bytes: bytes, config: _PreprocessConfig) -> str:
+        """Apply a specific preprocessing config and return OCR text."""
+        img = Image.open(BytesIO(image_bytes))
+        img = img.convert("L")
+
+        if config.contrast_cutoff > 0:
+            img = ImageOps.autocontrast(img, cutoff=config.contrast_cutoff)
+
+        if config.invert:
+            img = ImageOps.invert(img)
+
+        if config.threshold > 0:
+            img = img.point(lambda x: 255 if x > config.threshold else 0)
+
+        img = img.resize(
+            (img.width * config.upscale, img.height * config.upscale),
+            Image.LANCZOS,
+        )
+        img = img.filter(ImageFilter.MedianFilter(3))
+
+        if config.sharpen:
+            img = img.filter(ImageFilter.SHARPEN)
+
+        text = pytesseract.image_to_string(
+            img,
+            config=f"--psm {config.psm} -c tessedit_char_whitelist=0123456789+-xX*=? ",
+        )
+        return text.strip()
+
+    @staticmethod
+    def _parse_math_expression(text: str) -> int:
+        """Parse a math expression from OCR text and compute the answer."""
+        # Normalize common OCR artifacts
+        cleaned = text.replace("X", "x").replace("\u00d7", "x").replace("\u00f7", "/")
+        cleaned = cleaned.replace("\u2014", "-").replace("\u2013", "-")
+        cleaned = cleaned.replace("?", "").replace("=", "").strip()
+
+        match = re.search(r"(\d+)\s*([+\-x*/])\s*(\d+)", cleaned)
         if not match:
             raise SCCaptchaError(f"Could not parse math from OCR text: {text!r}")
 
@@ -227,8 +294,57 @@ class SCClient:
             return a - b
         elif op in ("x", "*"):
             return a * b
+        elif op == "/":
+            return a // b if b != 0 else 0
         else:
             raise SCCaptchaError(f"Unknown operator: {op!r}")
+
+    def _is_captcha_rejection(self, response_text: str) -> bool:
+        """Detect if the AJAX response indicates a wrong captcha answer."""
+        text_lower = response_text.lower().strip()
+        rejection_patterns = [
+            "incorrect captcha",
+            "captcha error",
+            "captcha verification failed",
+            "invalid captcha",
+            "wrong captcha",
+            "security code",
+        ]
+        for pattern in rejection_patterns:
+            if pattern in text_lower:
+                return True
+        # Empty or very short response with no table is suspicious
+        if len(text_lower) < 50 and "<table" not in text_lower:
+            return True
+        return False
+
+    def _log_captcha_failure(self, image_bytes: bytes, last_ocr_text: str) -> None:
+        """Log diagnostic info when all captcha strategies fail."""
+        try:
+            img = Image.open(BytesIO(image_bytes))
+            logger.error(
+                "CAPTCHA_DIAGNOSTIC: All strategies failed. "
+                "Last OCR text: %r. Image: %dx%d mode=%s size=%d bytes",
+                last_ocr_text, img.width, img.height, img.mode, len(image_bytes),
+            )
+        except Exception:
+            logger.error(
+                "CAPTCHA_DIAGNOSTIC: All strategies failed. "
+                "Last OCR text: %r. Image size: %d bytes (could not open)",
+                last_ocr_text, len(image_bytes),
+            )
+
+        # Optionally save to disk for debugging
+        if settings.sc_captcha_debug_dir:
+            try:
+                os.makedirs(settings.sc_captcha_debug_dir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = os.path.join(settings.sc_captcha_debug_dir, f"captcha_fail_{ts}.png")
+                with open(path, "wb") as f:
+                    f.write(image_bytes)
+                logger.error("CAPTCHA_DIAGNOSTIC: Saved failed captcha to %s", path)
+            except Exception:
+                logger.warning("Failed to save captcha debug image", exc_info=True)
 
     # ------------------------------------------------------------------
     # HTML parsing
@@ -358,6 +474,10 @@ class SCClient:
 
                 # Step 3: Solve captcha
                 answer = self._solve_math_captcha(image_bytes)
+                logger.info(
+                    "Captcha attempt %d/%d: solved answer=%d",
+                    attempt + 1, self._captcha_max_attempts, answer,
+                )
 
                 # Step 4: GET with query params
                 # Field names verified from browser DevTools Network tab capture:
@@ -399,8 +519,29 @@ class SCClient:
                     )
                     continue
 
-                # Step 5: Parse results
+                # Step 5: Check for captcha rejection (server may return
+                # HTTP 200 with an error message instead of 4xx)
+                if self._is_captcha_rejection(resp.text):
+                    logger.warning(
+                        "Captcha answer %d rejected by server (attempt %d/%d). "
+                        "Response preview: %s",
+                        answer, attempt + 1, self._captcha_max_attempts,
+                        resp.text[:200],
+                    )
+                    last_err = SCCaptchaError(
+                        f"Server rejected captcha answer: {answer}"
+                    )
+                    continue
+
+                # Step 6: Parse results
                 records = self._parse_results_table(resp.text)
+
+                if not records:
+                    logger.warning(
+                        "AJAX response contained no results table. "
+                        "Response length=%d, preview: %s",
+                        len(resp.text), resp.text[:300],
+                    )
 
                 await self._log_call(
                     "sc_daily_orders", self._ajax_url, watch_id,

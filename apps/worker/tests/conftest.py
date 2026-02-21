@@ -67,6 +67,7 @@ def patch_supabase(mock_supabase):
         patch("vigil.polling.supabase", mock_supabase, create=True),
         patch("vigil.notifier.supabase", mock_supabase, create=True),
         patch("vigil.ik_client.supabase", mock_supabase, create=True),
+        patch("vigil.sc_client.supabase", mock_supabase, create=True),
     ):
         yield mock_supabase
 
@@ -216,8 +217,10 @@ def reset_watch_backoffs():
     """Clear in-memory backoff state between tests."""
     from vigil import polling
     polling._watch_backoffs.clear()
+    polling._sc_consecutive_failures = 0
     yield
     polling._watch_backoffs.clear()
+    polling._sc_consecutive_failures = 0
 
 
 # ── SMTP / Slack Mocks ────────────────────────────────────
@@ -271,14 +274,65 @@ def test_settings():
         mock_settings.smtp_use_tls = False
         mock_settings.slack_webhook_url = "https://hooks.slack.com/test"
         mock_settings.polling_enabled = True
+        mock_settings.first_poll_lookback_days = 4
         mock_settings.timezone = "Asia/Kolkata"
         mock_settings.notification_email_enabled = True
         mock_settings.notification_slack_enabled = False
         mock_settings.notification_email_recipients = ""
         mock_settings.daily_digest_enabled = True
+        # SC scraper settings
+        mock_settings.sc_scraper_enabled = False
+        mock_settings.sc_scrape_schedule_hours = "8,17"
+        mock_settings.sc_base_url = "https://www.sci.gov.in"
+        mock_settings.sc_request_timeout_seconds = 10
+        mock_settings.sc_max_retries = 2
+        mock_settings.sc_captcha_max_attempts = 2
+        mock_settings.sc_rate_limit_seconds = 0.01
+        mock_settings.sc_lookback_days = 2
+        mock_settings.sc_pdf_download_enabled = True
+        mock_settings.tesseract_cmd = "tesseract"
         # Patch settings in modules that import it directly
         with (
             patch("vigil.notifier.settings", mock_settings, create=True),
             patch("vigil.polling.settings", mock_settings, create=True),
+            patch("vigil.sc_client.settings", mock_settings, create=True),
         ):
             yield mock_settings
+
+
+# ── SC Scraper Fixtures ──────────────────────────────────
+
+
+@pytest.fixture
+def sample_sc_order():
+    """A sample SC daily order record."""
+    from datetime import date
+
+    from vigil.sc_client import SCOrderRecord
+
+    return SCOrderRecord(
+        case_number="SLP(C) No. 12345/2025",
+        parties="Amazon Web Services Inc. vs Union of India",
+        order_date=date(2026, 2, 21),
+        pdf_url="https://www.sci.gov.in/pdf/order/12345.pdf",
+        court="Supreme Court of India",
+    )
+
+
+@pytest.fixture
+def sample_sc_pdf_text():
+    """Sample extracted text from an SC daily order PDF."""
+    return (
+        "IN THE SUPREME COURT OF INDIA\n"
+        "CIVIL APPELLATE JURISDICTION\n"
+        "SLP(C) No. 12345/2025\n\n"
+        "Amazon Web Services Inc. ... Petitioner\n"
+        "vs.\n"
+        "Union of India ... Respondent\n\n"
+        "ORDER\n\n"
+        "This petition under Article 136 challenges the order of the "
+        "Delhi High Court regarding cloud computing services and "
+        "Information Technology Act, 2000 compliance.\n"
+        "The matter relates to India Mauritius DTAA provisions "
+        "and transfer pricing norms applicable to digital services.\n"
+    )

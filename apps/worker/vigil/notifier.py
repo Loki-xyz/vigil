@@ -53,7 +53,7 @@ async def send_email_alert(
             body_lines.extend([
                 f"  {i}. {j.get('title', 'Unknown')}",
                 f"     Court: {j.get('court', 'Unknown')}",
-                f"     Link:  {j.get('ik_url', '')}",
+                f"     Link:  {j.get('ik_url') or j.get('external_url') or ''}",
                 "",
             ])
         body_lines.extend(["=" * 40, "", "Vigil · Trilegal Internal Tool"])
@@ -97,7 +97,7 @@ async def send_slack_alert(
         for match in matches:
             j = match.get("judgments", {})
             title = j.get("title", "Unknown")
-            url = j.get("ik_url", "")
+            url = j.get("ik_url") or j.get("external_url") or ""
             court = j.get("court", "Unknown")
             blocks.append({
                 "type": "section",

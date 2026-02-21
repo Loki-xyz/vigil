@@ -39,7 +39,7 @@ const matchColumns: ColumnDef<WatchMatch>[] = [
       const j = row.original.judgments
       return j ? (
         <a
-          href={j.ik_url}
+          href={j.ik_url || j.external_url || undefined}
           target="_blank"
           rel="noopener noreferrer"
           className="font-medium hover:underline"

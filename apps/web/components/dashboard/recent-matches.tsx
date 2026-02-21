@@ -51,7 +51,7 @@ export function RecentMatches() {
               <div key={match.id} className="flex items-center gap-3 text-sm">
                 <div className="min-w-0 flex-1">
                   <a
-                    href={match.judgments?.ik_url}
+                    href={match.judgments?.ik_url || match.judgments?.external_url || undefined}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-medium hover:underline truncate block"

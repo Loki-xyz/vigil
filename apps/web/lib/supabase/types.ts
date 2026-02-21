@@ -15,16 +15,21 @@ export interface Watch {
   updated_at: string
 }
 
+export type JudgmentSource = "ik_api" | "sc_website"
+
 export interface Judgment {
   id: string
-  ik_doc_id: number
+  ik_doc_id: number | null
   title: string
   court: string | null
   judgment_date: string | null
   headline: string | null
   doc_size: number | null
   num_cites: number
-  ik_url: string
+  ik_url: string | null
+  external_url: string | null
+  source: JudgmentSource
+  sc_case_number: string | null
   metadata_json: Record<string, unknown>
   first_seen_at: string
   created_at: string

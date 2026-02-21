@@ -62,7 +62,7 @@ const columns: ColumnDef<JudgmentWithMatchCount>[] = [
     header: "Title",
     cell: ({ row }) => (
       <a
-        href={row.original.ik_url}
+        href={row.original.ik_url || row.original.external_url || undefined}
         target="_blank"
         rel="noopener noreferrer"
         className="font-medium hover:underline"

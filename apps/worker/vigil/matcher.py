@@ -8,6 +8,10 @@ LOGIC:
    - Upsert into judgments table (ON CONFLICT on ik_doc_id).
    - Insert into watch_matches with is_notified=FALSE.
 2. Return only NEWLY created matches for notification.
+
+SC WEBSITE SUPPORT:
+- process_sc_orders() handles SC daily orders (source='sc_website').
+- Dedup key for SC: (sc_case_number, judgment_date) via partial unique index.
 """
 
 from __future__ import annotations
@@ -129,6 +133,108 @@ async def process_search_results(
             logger.error(
                 "Error processing doc %s for watch %s",
                 doc.get("tid"),
+                watch_id,
+                exc_info=True,
+            )
+            continue
+
+    return new_matches
+
+
+# ---------------------------------------------------------------------------
+# SC Website Orders
+# ---------------------------------------------------------------------------
+
+
+def _map_sc_order_to_judgment(order: "SCOrderRecord", full_text: str) -> dict:
+    """Map SC order fields to judgments table columns."""
+    from vigil.sc_client import SCOrderRecord  # noqa: F811
+
+    title = order.case_number
+    if order.parties:
+        title = f"{order.case_number} - {order.parties}"
+
+    return {
+        "source": "sc_website",
+        "sc_case_number": order.case_number,
+        "title": title,
+        "court": order.court,
+        "judgment_date": order.order_date.isoformat() if order.order_date else None,
+        "headline": order.parties,
+        "external_url": order.pdf_url,
+        "full_text": full_text[:100_000] if full_text else None,
+        "ik_doc_id": None,
+        "num_cites": 0,
+        "doc_size": len(full_text) if full_text else None,
+    }
+
+
+async def process_sc_orders(
+    watch_id: str,
+    orders: list[tuple],
+) -> list[dict]:
+    """
+    Process matched SC orders for a given watch.
+
+    Similar to process_search_results but for SC website orders.
+    Upserts judgments with source='sc_website', creates watch_matches.
+
+    Args:
+        watch_id: UUID of the watch.
+        orders: List of (SCOrderRecord, MatchResult, full_text) tuples
+                that have already been confirmed as matches.
+
+    Returns:
+        List of newly created watch_match records.
+    """
+    from vigil.sc_client import SCOrderRecord
+    from vigil.sc_matcher import MatchResult
+
+    if not orders:
+        return []
+
+    new_matches = []
+
+    for order, match_result, full_text in orders:
+        try:
+            judgment_data = _map_sc_order_to_judgment(order, full_text)
+
+            # Upsert judgment — the partial unique index on
+            # (sc_case_number, judgment_date) WHERE source='sc_website'
+            # handles dedup. We use a regular insert with conflict handling.
+            upsert_resp = (
+                supabase.table("judgments")
+                .upsert(judgment_data, on_conflict="sc_case_number,judgment_date")
+                .execute()
+            )
+
+            if not upsert_resp.data:
+                continue
+
+            judgment_id = upsert_resp.data[0]["id"]
+
+            match_data = {
+                "watch_id": watch_id,
+                "judgment_id": judgment_id,
+                "is_notified": False,
+                "snippet": (match_result.snippet[:500]
+                            if match_result.snippet else None),
+                "relevance_score": match_result.relevance_score,
+            }
+
+            match_resp = (
+                supabase.table("watch_matches")
+                .insert(match_data)
+                .execute()
+            )
+
+            if match_resp.data:
+                new_matches.extend(match_resp.data)
+
+        except Exception:
+            logger.error(
+                "Error processing SC order %s for watch %s",
+                getattr(order, "case_number", "unknown"),
                 watch_id,
                 exc_info=True,
             )

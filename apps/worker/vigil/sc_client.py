@@ -222,6 +222,10 @@ class SCClient:
         await self._rate_limit()
         resp = await self._client.get(self._page_url)
         resp.raise_for_status()
+        logger.info(
+            "SC page loaded: status=%d url=%s length=%d",
+            resp.status_code, str(resp.url), len(resp.text),
+        )
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -741,10 +745,11 @@ class SCClient:
                 }
 
                 await self._rate_limit()
-                resp = await self._client.get(
+                resp = await self._client.post(
                     self._ajax_url,
-                    params=params,
+                    data=params,
                     cookies=cookies,
+                    headers={"Referer": self._page_url},
                 )
 
                 elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -785,8 +790,10 @@ class SCClient:
                 if not records:
                     logger.warning(
                         "AJAX response contained no results table. "
-                        "Response length=%d, preview: %s",
-                        len(resp.text), resp.text[:300],
+                        "Response length=%d, content-type=%s, preview:\n%s",
+                        len(resp.text),
+                        resp.headers.get("content-type", "unknown"),
+                        resp.text[:2000],
                     )
 
                 await self._log_call(

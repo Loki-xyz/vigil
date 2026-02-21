@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useSearchParams } from "next/navigation"
 import { Eye, EyeOff, ArrowRight, Loader2 } from "lucide-react"
 
 export default function LoginPage() {
@@ -10,7 +10,6 @@ export default function LoginPage() {
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
   const [mounted, setMounted] = useState(false)
-  const router = useRouter()
   const searchParams = useSearchParams()
 
   useEffect(() => {
@@ -35,8 +34,7 @@ export default function LoginPage() {
 
       if (data.success) {
         const redirect = searchParams.get("redirect") || "/"
-        router.push(redirect)
-        router.refresh()
+        window.location.href = redirect
       } else {
         setError("Incorrect password")
         setPassword("")

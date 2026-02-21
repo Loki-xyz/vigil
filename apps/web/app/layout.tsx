@@ -1,5 +1,5 @@
 import type { Metadata } from "next"
-import { Inter, Instrument_Serif, Geist_Mono } from "next/font/google"
+import { fontVariables } from "@/lib/fonts"
 import "./globals.css"
 import { ThemeProvider } from "@/components/layout/theme-provider"
 import { Sidebar } from "@/components/layout/sidebar"
@@ -7,22 +7,6 @@ import { CommandPalette } from "@/components/layout/command-palette"
 import { RealtimeListener } from "@/components/layout/realtime-listener"
 import { Providers } from "@/components/providers"
 import { Toaster } from "@/components/ui/sonner"
-
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-})
-
-const instrumentSerif = Instrument_Serif({
-  variable: "--font-instrument-serif",
-  weight: "400",
-  subsets: ["latin"],
-})
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-})
 
 const appName = process.env.NEXT_PUBLIC_APP_NAME || "Vigil"
 
@@ -40,7 +24,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${inter.variable} ${instrumentSerif.variable} ${geistMono.variable} font-sans antialiased`}
+        className={`${fontVariables} font-sans antialiased`}
       >
         <ThemeProvider>
           <Providers>

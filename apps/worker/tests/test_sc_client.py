@@ -633,22 +633,25 @@ class TestFetchDailyOrders:
 
         captcha_image = _make_captcha_image_bytes()
 
-        mock_responses = [
+        get_responses = [
             # GET page
             httpx.Response(200, text=captcha_page_html,
                           request=httpx.Request("GET", "https://test.sci.gov.in/daily-order-rop-date/")),
             # GET captcha image
             httpx.Response(200, content=captcha_image,
                           request=httpx.Request("GET", "https://test.sci.gov.in/?_siwp_captcha&id=abc123")),
-            # GET form submission (was POST, now GET with query params)
-            httpx.Response(200, text=results_html,
-                          request=httpx.Request("GET", "https://test.sci.gov.in/wp-admin/admin-ajax.php")),
         ]
+        post_response = httpx.Response(
+            200, text=results_html,
+            request=httpx.Request("POST", "https://test.sci.gov.in/wp-admin/admin-ajax.php"),
+        )
 
         with (
             patch.object(client, "_rate_limit", new_callable=AsyncMock),
             patch.object(client._client, "get", new_callable=AsyncMock,
-                        side_effect=[mock_responses[0], mock_responses[1], mock_responses[2]]),
+                        side_effect=get_responses),
+            patch.object(client._client, "post", new_callable=AsyncMock,
+                        return_value=post_response),
             patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
             orders = await client.fetch_daily_orders(
@@ -729,18 +732,21 @@ class TestFetchDailyOrders:
                             # Attempt 1: captcha image
                             httpx.Response(200, content=captcha_image,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
-                            # Attempt 1: AJAX returns rejection
-                            httpx.Response(200, text="Incorrect captcha value",
-                                          request=httpx.Request("GET", "https://test.sci.gov.in/")),
                             # Attempt 2: page
                             httpx.Response(200, text=captcha_page_html,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
                             # Attempt 2: captcha image
                             httpx.Response(200, content=captcha_image,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
+                        ]),
+            patch.object(client._client, "post", new_callable=AsyncMock,
+                        side_effect=[
+                            # Attempt 1: AJAX returns rejection
+                            httpx.Response(200, text="Incorrect captcha value",
+                                          request=httpx.Request("POST", "https://test.sci.gov.in/")),
                             # Attempt 2: AJAX returns valid results
                             httpx.Response(200, text=results_html,
-                                          request=httpx.Request("GET", "https://test.sci.gov.in/")),
+                                          request=httpx.Request("POST", "https://test.sci.gov.in/")),
                         ]),
             patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
@@ -774,12 +780,12 @@ class TestFetchDailyOrders:
                             # GET captcha image
                             httpx.Response(200, content=captcha_image,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
-                            # GET form submission (was POST, now GET) — returns 500
-                            httpx.Response(
-                                500, text="Internal Server Error",
-                                request=httpx.Request("GET", "https://test.sci.gov.in/"),
-                            ),
                         ]),
+            patch.object(client._client, "post", new_callable=AsyncMock,
+                        return_value=httpx.Response(
+                            500, text="Internal Server Error",
+                            request=httpx.Request("POST", "https://test.sci.gov.in/"),
+                        )),
             patch.object(client, "_solve_math_captcha", new_callable=AsyncMock, return_value=8),
         ):
             with pytest.raises(SCWebsiteUnavailableError):

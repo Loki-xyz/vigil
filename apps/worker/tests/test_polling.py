@@ -724,10 +724,15 @@ class TestSetupScheduler:
         scheduler = setup_scheduler()
         assert isinstance(scheduler, AsyncIOScheduler)
 
-    def test_has_four_jobs(self):
-        """4 jobs configured: poll_cycle, dispatch, digest, check_poll_requests."""
+    def test_has_expected_jobs(self):
+        """Base 4 jobs + SC scrape jobs when SC scraper is enabled."""
         scheduler = setup_scheduler()
-        assert len(scheduler.get_jobs()) == 4
+        job_ids = {j.id for j in scheduler.get_jobs()}
+        # Core jobs always present
+        assert "poll_cycle" in job_ids
+        assert "dispatch_pending_notifications" in job_ids
+        assert "send_daily_digest" in job_ids
+        assert "check_poll_requests" in job_ids
 
     def test_poll_cycle_interval_30min(self):
         """poll_cycle every 30 minutes."""

@@ -64,6 +64,7 @@ class SCPDFDownloadError(SCScraperError):
 class SCOrderRecord:
     """Parsed row from the SC daily orders results table."""
     case_number: str
+    diary_number: str
     parties: str
     order_date: date | None
     pdf_url: str
@@ -143,6 +144,12 @@ class SCClient:
 
         Returns:
             (captcha_image_url, hidden_form_fields, session_cookies)
+
+        Hidden fields extracted (verified via browser DevTools):
+            - scid: captcha session ID
+            - tok_*: dynamic CSRF-like token
+            - _ch_field: honeypot (must be empty)
+            - es_ajax_request: always "1"
         """
         await self._rate_limit()
         resp = await self._client.get(self._page_url)
@@ -150,8 +157,12 @@ class SCClient:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        # Scope to the ROP Date form specifically
+        form = soup.find("form", id="sciapi-services-daily-order-rop-date")
+        search_root = form or soup
+
         # Find captcha image
-        captcha_img = soup.find("img", src=re.compile(r"_siwp_captcha"))
+        captcha_img = search_root.find("img", src=re.compile(r"_siwp_captcha"))
         if not captcha_img:
             raise SCWebsiteUnavailableError("Captcha image not found on page")
 
@@ -159,9 +170,9 @@ class SCClient:
         if not captcha_url.startswith("http"):
             captcha_url = f"{self._base_url}{captcha_url}"
 
-        # Extract hidden form fields (nonce, action, etc.)
+        # Extract hidden form fields (scid, tok_*, _ch_field, es_ajax_request)
         hidden_fields: dict[str, str] = {}
-        for inp in soup.find_all("input", {"type": "hidden"}):
+        for inp in search_root.find_all("input", {"type": "hidden"}):
             name = inp.get("name")
             value = inp.get("value", "")
             if name:
@@ -227,9 +238,18 @@ class SCClient:
         """
         Parse the AJAX response HTML to extract order records.
 
-        NOTE: The exact table structure should be verified against real
-        AJAX responses captured via browser DevTools. Column indices
-        may need adjustment.
+        Verified column structure (from browser DevTools capture):
+            [0] Serial Number
+            [1] Diary Number
+            [2] Case Number
+            [3] Petitioner / Respondent
+            [4] Petitioner/Respondent Advocate
+            [5] Bench (often empty, class="bt-hide")
+            [6] Judgment By (often empty, class="bt-hide")
+            [7] ROP — contains <a> link to PDF, link text is the date
+
+        Each <tr> has a data-diary-no attribute.
+        PDF URLs are absolute (api.sci.gov.in domain).
         """
         soup = BeautifulSoup(html, "html.parser")
         table = soup.find("table")
@@ -238,7 +258,8 @@ class SCClient:
             return []
 
         records: list[SCOrderRecord] = []
-        rows = table.find_all("tr")[1:]  # Skip header row
+        tbody = table.find("tbody")
+        rows = (tbody or table).find_all("tr")
 
         for row in rows:
             cells = row.find_all("td")
@@ -246,27 +267,42 @@ class SCClient:
                 continue
 
             try:
-                # Expected columns: S.No. | Case No. | Parties | Date | Download
-                case_number = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                parties = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                # Column indices verified from real AJAX response
+                diary_number = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                case_number = cells[2].get_text(strip=True) if len(cells) > 2 else ""
 
-                # Parse date (DD-MM-YYYY or DD/MM/YYYY)
-                date_text = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-                order_date = self._parse_date(date_text)
+                # Parties: contains <div>PETITIONER</div><div>VS<br>RESPONDENT</div>
+                parties_cell = cells[3] if len(cells) > 3 else None
+                parties = ""
+                if parties_cell:
+                    divs = parties_cell.find_all("div")
+                    if divs:
+                        parts = [d.get_text(strip=True) for d in divs]
+                        parties = " ".join(parts)
+                    else:
+                        parties = parties_cell.get_text(strip=True)
 
-                # Find PDF link
-                pdf_link = row.find("a", href=True)
+                # ROP column (last data column) has <a> with PDF link
+                # The link text IS the date (e.g. "20-02-2026")
+                rop_cell = cells[7] if len(cells) > 7 else cells[-1]
+                pdf_link = rop_cell.find("a", href=True) if rop_cell else None
                 pdf_url = ""
+                order_date = None
+
                 if pdf_link:
                     href = pdf_link["href"]
                     if not href.startswith("http"):
                         pdf_url = f"{self._base_url}{href}"
                     else:
                         pdf_url = href
+                    # Date is the link text
+                    date_text = pdf_link.get_text(strip=True)
+                    order_date = self._parse_date(date_text)
 
                 if case_number and pdf_url:
                     records.append(SCOrderRecord(
                         case_number=case_number,
+                        diary_number=diary_number,
                         parties=parties,
                         order_date=order_date,
                         pdf_url=pdf_url,
@@ -303,7 +339,7 @@ class SCClient:
         1. Get captcha session (page + cookies)
         2. Download captcha image
         3. Solve math captcha
-        4. POST form data
+        4. GET with query params (verified via browser DevTools)
         5. Parse HTML results table
         6. Return list of SCOrderRecord
 
@@ -323,18 +359,25 @@ class SCClient:
                 # Step 3: Solve captcha
                 answer = self._solve_math_captcha(image_bytes)
 
-                # Step 4: POST form
-                form_data = {
+                # Step 4: GET with query params
+                # Field names verified from browser DevTools Network tab capture:
+                #   from_date, to_date, scid, tok_*, siwp_captcha_value,
+                #   es_ajax_request=1, submit=Search,
+                #   action=get_daily_order_rop_date, language=en
+                params = {
                     **hidden_fields,
                     "from_date": from_date.strftime("%d-%m-%Y"),
                     "to_date": to_date.strftime("%d-%m-%Y"),
-                    "captcha_code": str(answer),
+                    "siwp_captcha_value": str(answer),
+                    "submit": "Search",
+                    "action": "get_daily_order_rop_date",
+                    "language": "en",
                 }
 
                 await self._rate_limit()
-                resp = await self._client.post(
+                resp = await self._client.get(
                     self._ajax_url,
-                    data=form_data,
+                    params=params,
                     cookies=cookies,
                 )
 

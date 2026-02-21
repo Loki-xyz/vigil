@@ -35,16 +35,47 @@ def _make_captcha_image_bytes() -> bytes:
     return buf.getvalue()
 
 
-def _make_results_html(rows: list[tuple[str, str, str, str, str]]) -> str:
-    """Build an HTML table matching the expected SC website format."""
-    header = "<tr><th>S.No.</th><th>Case No.</th><th>Parties</th><th>Date</th><th>Download</th></tr>"
+def _make_results_html(rows: list[tuple[str, str, str, str, str, str]]) -> str:
+    """Build an HTML table matching the real SC website 8-column format.
+
+    Each row tuple: (serial, diary_no, case_no, parties, advocate, pdf_path_and_date)
+    where pdf_path_and_date is "url|dd-mm-yyyy" (pipe-separated).
+    """
+    header = (
+        "<thead><tr>"
+        "<th>Serial Number</th><th>Diary Number</th><th>Case Number</th>"
+        "<th>Petitioner / Respondent</th><th>Petitioner/Respondent Advocate</th>"
+        "<th>Bench</th><th>Judgment By</th><th>ROP</th>"
+        "</tr></thead>"
+    )
     body = ""
-    for sno, case, parties, dt, pdf_path in rows:
+    for serial, diary_no, case_no, parties, advocate, pdf_date in rows:
+        pdf_path, dt = pdf_date.split("|") if "|" in pdf_date else (pdf_date, "")
+        pet, resp_ = ("", "")
+        if " vs " in parties.lower():
+            idx = parties.lower().index(" vs ")
+            pet = parties[:idx]
+            resp_ = parties[idx + 4:]
+        else:
+            pet = parties
+
         body += (
-            f"<tr><td>{sno}</td><td>{case}</td><td>{parties}</td>"
-            f"<td>{dt}</td><td><a href=\"{pdf_path}\">PDF</a></td></tr>"
+            f'<tr data-diary-no="{diary_no}">'
+            f'  <td data-th="Serial Number"><span class="bt-content">{serial}</span></td>'
+            f'  <td data-th="Diary Number"><span class="bt-content">{diary_no}</span></td>'
+            f'  <td data-th="Case Number"><span class="bt-content">{case_no}</span></td>'
+            f'  <td class="petitioners" data-th="Petitioner / Respondent">'
+            f'    <span class="bt-content"><div>{pet}</div><div>VS<br>{resp_}</div></span>'
+            f'  </td>'
+            f'  <td data-th="Petitioner/Respondent Advocate"><span class="bt-content">{advocate}</span></td>'
+            f'  <td class="bt-hide"></td>'
+            f'  <td class="bt-hide"></td>'
+            f'  <td data-th="ROP"><span class="bt-content">'
+            f'    <a target="_blank" href="{pdf_path}">{dt}</a><br>'
+            f'  </span></td>'
+            f'</tr>'
         )
-    return f"<table>{header}{body}</table>"
+    return f"<table>{header}<tbody>{body}</tbody></table>"
 
 
 # ── Math Captcha Solving ─────────────────────────────────
@@ -107,25 +138,31 @@ class TestParseResultsTable:
     def test_valid_table(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         html = _make_results_html([
-            ("1", "SLP(C) 12345/2025", "X vs Y", "21-02-2026", "/pdf/order.pdf"),
+            ("1", "132-2026", "SLP(C) 12345/2025", "X vs Y", "ADV NAME",
+             "https://api.sci.gov.in/pdf/order.pdf|21-02-2026"),
         ])
         records = client._parse_results_table(html)
         assert len(records) == 1
         assert records[0].case_number == "SLP(C) 12345/2025"
-        assert records[0].parties == "X vs Y"
+        assert records[0].diary_number == "132-2026"
+        assert records[0].parties == "X VSY"
         assert records[0].order_date == date(2026, 2, 21)
-        assert records[0].pdf_url == "https://test.sci.gov.in/pdf/order.pdf"
+        assert records[0].pdf_url == "https://api.sci.gov.in/pdf/order.pdf"
 
     def test_multiple_rows(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         html = _make_results_html([
-            ("1", "SLP(C) 111/2025", "A vs B", "21-02-2026", "/pdf/1.pdf"),
-            ("2", "WP(C) 222/2025", "C vs D", "20-02-2026", "/pdf/2.pdf"),
+            ("1", "100-2026", "SLP(C) 111/2025", "A vs B", "ADV1",
+             "https://api.sci.gov.in/pdf/1.pdf|21-02-2026"),
+            ("2", "200-2026", "WP(C) 222/2025", "C vs D", "ADV2",
+             "https://api.sci.gov.in/pdf/2.pdf|20-02-2026"),
         ])
         records = client._parse_results_table(html)
         assert len(records) == 2
         assert records[0].case_number == "SLP(C) 111/2025"
+        assert records[0].diary_number == "100-2026"
         assert records[1].case_number == "WP(C) 222/2025"
+        assert records[1].diary_number == "200-2026"
 
     def test_no_table_returns_empty(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
@@ -135,8 +172,8 @@ class TestParseResultsTable:
     def test_absolute_pdf_url(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         html = _make_results_html([
-            ("1", "SLP(C) 12345/2025", "X vs Y", "21-02-2026",
-             "https://cdn.sci.gov.in/pdf/order.pdf"),
+            ("1", "132-2026", "SLP(C) 12345/2025", "X vs Y", "ADV",
+             "https://cdn.sci.gov.in/pdf/order.pdf|21-02-2026"),
         ])
         records = client._parse_results_table(html)
         assert records[0].pdf_url == "https://cdn.sci.gov.in/pdf/order.pdf"
@@ -144,7 +181,8 @@ class TestParseResultsTable:
     def test_invalid_date(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         html = _make_results_html([
-            ("1", "SLP(C) 12345/2025", "X vs Y", "invalid-date", "/pdf/order.pdf"),
+            ("1", "132-2026", "SLP(C) 12345/2025", "X vs Y", "ADV",
+             "https://api.sci.gov.in/pdf/order.pdf|invalid-date"),
         ])
         records = client._parse_results_table(html)
         assert len(records) == 1
@@ -152,7 +190,7 @@ class TestParseResultsTable:
 
     def test_rows_with_too_few_cells_skipped(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
-        html = "<table><tr><th>H</th></tr><tr><td>only one</td></tr></table>"
+        html = "<table><tbody><tr><td>only one</td><td>two</td><td>three</td></tr></tbody></table>"
         records = client._parse_results_table(html)
         assert records == []
 
@@ -191,7 +229,8 @@ class TestFetchDailyOrders:
             '</body></html>'
         )
         results_html = _make_results_html([
-            ("1", "SLP(C) 12345/2025", "X vs Y", "21-02-2026", "/pdf/order.pdf"),
+            ("1", "132-2026", "SLP(C) 12345/2025", "X vs Y", "ADV",
+             "https://api.sci.gov.in/pdf/order.pdf|21-02-2026"),
         ])
 
         captcha_image = _make_captcha_image_bytes()
@@ -203,17 +242,15 @@ class TestFetchDailyOrders:
             # GET captcha image
             httpx.Response(200, content=captcha_image,
                           request=httpx.Request("GET", "https://test.sci.gov.in/?_siwp_captcha&id=abc123")),
-            # POST form
+            # GET form submission (was POST, now GET with query params)
             httpx.Response(200, text=results_html,
-                          request=httpx.Request("POST", "https://test.sci.gov.in/wp-admin/admin-ajax.php")),
+                          request=httpx.Request("GET", "https://test.sci.gov.in/wp-admin/admin-ajax.php")),
         ]
 
         with (
             patch.object(client, "_rate_limit", new_callable=AsyncMock),
             patch.object(client._client, "get", new_callable=AsyncMock,
-                        side_effect=[mock_responses[0], mock_responses[1]]),
-            patch.object(client._client, "post", new_callable=AsyncMock,
-                        return_value=mock_responses[2]),
+                        side_effect=[mock_responses[0], mock_responses[1], mock_responses[2]]),
             patch("vigil.sc_client.pytesseract") as mock_tess,
         ):
             mock_tess.image_to_string.return_value = "3 + 5 = ?"
@@ -224,6 +261,7 @@ class TestFetchDailyOrders:
 
         assert len(orders) == 1
         assert orders[0].case_number == "SLP(C) 12345/2025"
+        assert orders[0].diary_number == "132-2026"
 
     async def test_captcha_retry_on_failure(self, patch_supabase, test_settings):
         client = SCClient(
@@ -286,16 +324,18 @@ class TestFetchDailyOrders:
             patch.object(client, "_rate_limit", new_callable=AsyncMock),
             patch.object(client._client, "get", new_callable=AsyncMock,
                         side_effect=[
+                            # GET page
                             httpx.Response(200, text=captcha_page_html,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
+                            # GET captcha image
                             httpx.Response(200, content=captcha_image,
                                           request=httpx.Request("GET", "https://test.sci.gov.in/")),
+                            # GET form submission (was POST, now GET) — returns 500
+                            httpx.Response(
+                                500, text="Internal Server Error",
+                                request=httpx.Request("GET", "https://test.sci.gov.in/"),
+                            ),
                         ]),
-            patch.object(client._client, "post", new_callable=AsyncMock,
-                        return_value=httpx.Response(
-                            500, text="Internal Server Error",
-                            request=httpx.Request("POST", "https://test.sci.gov.in/"),
-                        )),
             patch("vigil.sc_client.pytesseract") as mock_tess,
         ):
             mock_tess.image_to_string.return_value = "3 + 5 = ?"

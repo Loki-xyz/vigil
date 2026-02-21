@@ -312,6 +312,7 @@ def sample_sc_order():
 
     return SCOrderRecord(
         case_number="SLP(C) No. 12345/2025",
+        diary_number="12345-2025",
         parties="Amazon Web Services Inc. vs Union of India",
         order_date=date(2026, 2, 21),
         pdf_url="https://www.sci.gov.in/pdf/order/12345.pdf",

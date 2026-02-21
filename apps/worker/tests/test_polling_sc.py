@@ -46,10 +46,12 @@ def _make_non_sc_watch(watch_id: str = "w2") -> dict:
 
 def _make_sc_order(
     case_number: str = "SLP(C) No. 12345/2025",
+    diary_number: str = "12345-2025",
     parties: str = "Amazon Web Services Inc. vs Union of India",
 ) -> SCOrderRecord:
     return SCOrderRecord(
         case_number=case_number,
+        diary_number=diary_number,
         parties=parties,
         order_date=date(2026, 2, 21),
         pdf_url="https://www.sci.gov.in/pdf/order.pdf",

@@ -22,12 +22,14 @@ from vigil.sc_matcher import (
 
 def _make_order(
     case_number: str = "SLP(C) No. 12345/2025",
+    diary_number: str = "12345-2025",
     parties: str = "Amazon Web Services Inc. vs Union of India",
     order_date: date | None = date(2026, 2, 21),
     pdf_url: str = "https://www.sci.gov.in/pdf/order.pdf",
 ) -> SCOrderRecord:
     return SCOrderRecord(
         case_number=case_number,
+        diary_number=diary_number,
         parties=parties,
         order_date=order_date,
         pdf_url=pdf_url,

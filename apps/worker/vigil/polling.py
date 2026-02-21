@@ -246,8 +246,18 @@ async def check_poll_requests() -> None:
                 .execute()
             )
             watch = watch_resp.data
+            court_filter = watch.get("court_filter") or []
+            is_sc = "supremecourt" in court_filter
 
-            await poll_single_watch(watch)
+            # SC watches: use scraper instead of IK API (more reliable, no cost)
+            if is_sc and settings.sc_scraper_enabled:
+                sc_matches = await sc_scrape_for_watch(watch)
+                logger.info(
+                    "Poll Now SC scrape for watch %s found %d matches",
+                    watch["id"], len(sc_matches),
+                )
+            else:
+                await poll_single_watch(watch)
 
             # Mark as done
             supabase.table("poll_requests").update(
@@ -406,6 +416,88 @@ async def sc_scrape_cycle() -> None:
     except Exception:
         _sc_consecutive_failures += 1
         logger.error("Unexpected error in SC scrape cycle", exc_info=True)
+
+
+async def sc_scrape_for_watch(watch: dict) -> list[dict]:
+    """
+    Run SC website scrape and two-phase matching for a single watch.
+
+    Used by check_poll_requests() for user-initiated "Poll Now" on SC watches.
+    Does NOT modify _sc_consecutive_failures (user-initiated, not scheduled).
+    Does NOT call dispatch_pending_notifications (the 10-min job handles that).
+
+    Returns list of newly created watch_match dicts. Returns [] on any error.
+    """
+    try:
+        client = _get_sc_client()
+        from_date = (
+            datetime.now(timezone.utc) - timedelta(days=settings.sc_lookback_days)
+        ).date()
+        to_date = datetime.now(timezone.utc).date()
+
+        orders = await client.fetch_daily_orders(from_date, to_date)
+        logger.info(
+            "Poll Now SC scrape for watch %s fetched %d orders (%s to %s)",
+            watch["id"], len(orders), from_date, to_date,
+        )
+
+        if not orders:
+            return []
+
+        all_new_matches: list[dict] = []
+
+        for order in orders:
+            # Phase 1: Fast match on parties/case_number (no PDF)
+            result = match_order_against_watch(order, watch, full_text=None)
+            if result.is_match:
+                try:
+                    matches = await process_sc_orders(
+                        watch["id"], [(order, result, "")],
+                    )
+                    all_new_matches.extend(matches)
+                except Exception:
+                    logger.error(
+                        "Error processing SC order %s for watch %s",
+                        order.case_number, watch["id"], exc_info=True,
+                    )
+                continue
+
+            # Phase 2: Download PDF if needed and re-match
+            if needs_pdf_download(order, [watch]) and settings.sc_pdf_download_enabled:
+                full_text: str | None = None
+                try:
+                    full_text = await client.download_and_parse_pdf(order.pdf_url)
+                except SCPDFDownloadError:
+                    logger.warning(
+                        "Failed to download PDF for %s", order.case_number,
+                    )
+
+                if full_text:
+                    result = match_order_against_watch(order, watch, full_text=full_text)
+                    if result.is_match:
+                        try:
+                            matches = await process_sc_orders(
+                                watch["id"], [(order, result, full_text)],
+                            )
+                            all_new_matches.extend(matches)
+                        except Exception:
+                            logger.error(
+                                "Error processing SC order %s for watch %s",
+                                order.case_number, watch["id"], exc_info=True,
+                            )
+
+        return all_new_matches
+
+    except (SCCaptchaError, SCScraperError):
+        logger.error(
+            "SC scrape failed for Poll Now watch %s", watch.get("id"), exc_info=True,
+        )
+        return []
+    except Exception:
+        logger.error(
+            "Unexpected error in SC scrape for watch %s", watch.get("id"), exc_info=True,
+        )
+        return []
 
 
 def setup_scheduler() -> AsyncIOScheduler:

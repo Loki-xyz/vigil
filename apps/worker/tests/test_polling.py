@@ -512,6 +512,118 @@ class TestCheckPollRequests:
 
         mock_poll.assert_not_called()
 
+    async def test_sc_watch_uses_scraper_not_ik(
+        self, patch_supabase, sample_watch_entity, test_settings
+    ):
+        """SC watch + scraper enabled -> uses sc_scrape_for_watch, NOT poll_single_watch."""
+        test_settings.sc_scraper_enabled = True
+        # sample_watch_entity has court_filter=["supremecourt", "delhi"]
+        poll_req = {
+            "id": "pr-1",
+            "watch_id": sample_watch_entity["id"],
+            "status": "pending",
+        }
+
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[poll_req]),  # fetch pending
+            MagicMock(data=[{}]),  # update processing
+            MagicMock(data=sample_watch_entity),  # fetch watch
+            MagicMock(data=[{}]),  # update done
+        ]
+
+        with (
+            patch(
+                "vigil.polling.poll_single_watch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ik_poll,
+            patch(
+                "vigil.polling.sc_scrape_for_watch",
+                new_callable=AsyncMock,
+                return_value=[{"id": "sc-m1"}],
+            ) as mock_sc_scrape,
+        ):
+            await check_poll_requests()
+
+        mock_sc_scrape.assert_called_once_with(sample_watch_entity)
+        mock_ik_poll.assert_not_called()
+
+    async def test_non_sc_watch_uses_ik_not_scraper(
+        self, patch_supabase, test_settings
+    ):
+        """Non-SC watch -> uses poll_single_watch (IK API), NOT sc_scrape_for_watch."""
+        test_settings.sc_scraper_enabled = True
+        delhi_watch = {
+            "id": "w-delhi",
+            "name": "Delhi Watch",
+            "watch_type": "entity",
+            "query_terms": "test",
+            "court_filter": ["delhi"],
+            "is_active": True,
+        }
+        poll_req = {
+            "id": "pr-2",
+            "watch_id": "w-delhi",
+            "status": "pending",
+        }
+
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[poll_req]),  # fetch pending
+            MagicMock(data=[{}]),  # update processing
+            MagicMock(data=delhi_watch),  # fetch watch
+            MagicMock(data=[{}]),  # update done
+        ]
+
+        with (
+            patch(
+                "vigil.polling.poll_single_watch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ik_poll,
+            patch(
+                "vigil.polling.sc_scrape_for_watch",
+                new_callable=AsyncMock,
+            ) as mock_sc_scrape,
+        ):
+            await check_poll_requests()
+
+        mock_ik_poll.assert_called_once()
+        mock_sc_scrape.assert_not_called()
+
+    async def test_sc_scraper_disabled_falls_back_to_ik(
+        self, patch_supabase, sample_watch_entity, test_settings
+    ):
+        """SC watch but scraper disabled -> falls back to poll_single_watch (IK API)."""
+        test_settings.sc_scraper_enabled = False
+        poll_req = {
+            "id": "pr-3",
+            "watch_id": sample_watch_entity["id"],
+            "status": "pending",
+        }
+
+        patch_supabase.table.return_value.execute.side_effect = [
+            MagicMock(data=[poll_req]),  # fetch pending
+            MagicMock(data=[{}]),  # update processing
+            MagicMock(data=sample_watch_entity),  # fetch watch
+            MagicMock(data=[{}]),  # update done
+        ]
+
+        with (
+            patch(
+                "vigil.polling.poll_single_watch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ik_poll,
+            patch(
+                "vigil.polling.sc_scrape_for_watch",
+                new_callable=AsyncMock,
+            ) as mock_sc_scrape,
+        ):
+            await check_poll_requests()
+
+        mock_ik_poll.assert_called_once()
+        mock_sc_scrape.assert_not_called()
+
 
 # ============================================================================
 # setup_scheduler

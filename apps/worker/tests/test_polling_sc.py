@@ -1,15 +1,15 @@
 """
-Tests for sc_scrape_cycle() in vigil.polling.
+Tests for sc_scrape_cycle() and sc_scrape_for_watch() in vigil.polling.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vigil.sc_client import SCCaptchaError, SCOrderRecord, SCScraperError
+from vigil.sc_client import SCCaptchaError, SCOrderRecord, SCPDFDownloadError, SCScraperError
 
 
 # ── Helpers ──────────────────────────────────────────────
@@ -56,6 +56,194 @@ def _make_sc_order(
         order_date=date(2026, 2, 21),
         pdf_url="https://www.sci.gov.in/pdf/order.pdf",
     )
+
+
+# ── sc_scrape_for_watch Tests ────────────────────────────
+
+
+class TestScScrapeForWatch:
+    """Tests for sc_scrape_for_watch — single-watch SC scrape for Poll Now."""
+
+    async def test_happy_path(self, test_settings):
+        """Fetches orders, matches, processes, returns new matches."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch()
+        order = _make_sc_order()
+
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[order])
+
+        with (
+            patch("vigil.polling._get_sc_client", return_value=mock_client),
+            patch("vigil.polling.match_order_against_watch") as mock_match,
+            patch("vigil.polling.needs_pdf_download", return_value=False),
+            patch("vigil.polling.process_sc_orders", new_callable=AsyncMock,
+                  return_value=[{"id": "wm-1"}]) as mock_process,
+        ):
+            from vigil.sc_matcher import MatchResult
+            mock_match.return_value = MatchResult(
+                is_match=True, relevance_score=0.9,
+                matched_terms=["Amazon Web Services"],
+                snippet="...Amazon Web Services...",
+            )
+
+            result = await sc_scrape_for_watch(watch)
+
+        assert len(result) == 1
+        assert result[0]["id"] == "wm-1"
+        mock_client.fetch_daily_orders.assert_called_once()
+        mock_process.assert_called_once()
+
+    async def test_no_orders_returns_empty(self, test_settings):
+        """fetch_daily_orders returns [] -> returns [] immediately."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch()
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[])
+
+        with patch("vigil.polling._get_sc_client", return_value=mock_client):
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
+
+    async def test_no_match_returns_empty(self, test_settings):
+        """Orders exist but none match -> returns []."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch(query_terms="Nonexistent Corp")
+        order = _make_sc_order(parties="X vs Y")
+
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[order])
+
+        with (
+            patch("vigil.polling._get_sc_client", return_value=mock_client),
+            patch("vigil.polling.match_order_against_watch") as mock_match,
+            patch("vigil.polling.needs_pdf_download", return_value=False),
+        ):
+            from vigil.sc_matcher import MatchResult
+            mock_match.return_value = MatchResult(is_match=False, relevance_score=0.0)
+
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
+
+    async def test_phase2_pdf_download(self, test_settings):
+        """Phase 1 no match + needs_pdf -> downloads PDF, phase 2 matches."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch(watch_type="topic", query_terms="transfer pricing")
+        order = _make_sc_order(parties="X vs Y")
+
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[order])
+        mock_client.download_and_parse_pdf = AsyncMock(
+            return_value="Order about transfer pricing norms."
+        )
+
+        with (
+            patch("vigil.polling._get_sc_client", return_value=mock_client),
+            patch("vigil.polling.match_order_against_watch") as mock_match,
+            patch("vigil.polling.needs_pdf_download", return_value=True),
+            patch("vigil.polling.process_sc_orders", new_callable=AsyncMock,
+                  return_value=[{"id": "wm-2"}]),
+        ):
+            from vigil.sc_matcher import MatchResult
+            mock_match.side_effect = [
+                MatchResult(is_match=False, relevance_score=0.0),
+                MatchResult(is_match=True, relevance_score=0.7,
+                           matched_terms=["transfer", "pricing"],
+                           snippet="...transfer pricing..."),
+            ]
+
+            result = await sc_scrape_for_watch(watch)
+
+        assert len(result) == 1
+        mock_client.download_and_parse_pdf.assert_called_once()
+
+    async def test_pdf_download_failure_continues(self, test_settings):
+        """PDF download error -> phase 2 skipped, no crash, returns []."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch(watch_type="topic", query_terms="transfer pricing")
+        order = _make_sc_order(parties="X vs Y")
+
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[order])
+        mock_client.download_and_parse_pdf = AsyncMock(
+            side_effect=SCPDFDownloadError("timeout")
+        )
+
+        with (
+            patch("vigil.polling._get_sc_client", return_value=mock_client),
+            patch("vigil.polling.match_order_against_watch") as mock_match,
+            patch("vigil.polling.needs_pdf_download", return_value=True),
+            patch("vigil.polling.process_sc_orders", new_callable=AsyncMock) as mock_process,
+        ):
+            from vigil.sc_matcher import MatchResult
+            mock_match.return_value = MatchResult(is_match=False, relevance_score=0.0)
+
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
+        mock_process.assert_not_called()
+
+    async def test_captcha_error_returns_empty(self, test_settings):
+        """SCCaptchaError -> returns [], does not raise."""
+        from vigil.polling import sc_scrape_for_watch
+
+        watch = _make_sc_watch()
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(
+            side_effect=SCCaptchaError("captcha failed")
+        )
+
+        with patch("vigil.polling._get_sc_client", return_value=mock_client):
+            result = await sc_scrape_for_watch(watch)
+
+        assert result == []
+
+    async def test_does_not_increment_circuit_breaker(self, test_settings):
+        """Errors do NOT touch _sc_consecutive_failures."""
+        from vigil import polling
+        from vigil.polling import sc_scrape_for_watch
+
+        assert polling._sc_consecutive_failures == 0
+
+        watch = _make_sc_watch()
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(
+            side_effect=SCScraperError("website down")
+        )
+
+        with patch("vigil.polling._get_sc_client", return_value=mock_client):
+            await sc_scrape_for_watch(watch)
+
+        assert polling._sc_consecutive_failures == 0
+
+    async def test_date_range_uses_lookback(self, test_settings):
+        """from_date uses sc_lookback_days, to_date is today."""
+        from vigil.polling import sc_scrape_for_watch
+
+        test_settings.sc_lookback_days = 3
+
+        watch = _make_sc_watch()
+        mock_client = AsyncMock()
+        mock_client.fetch_daily_orders = AsyncMock(return_value=[])
+
+        with patch("vigil.polling._get_sc_client", return_value=mock_client):
+            await sc_scrape_for_watch(watch)
+
+        call_args = mock_client.fetch_daily_orders.call_args
+        from_date = call_args[0][0]
+        to_date = call_args[0][1]
+
+        expected_from = (datetime.now(timezone.utc) - timedelta(days=3)).date()
+        expected_to = datetime.now(timezone.utc).date()
+        assert from_date == expected_from
+        assert to_date == expected_to
 
 
 # ── sc_scrape_cycle Tests ────────────────────────────────

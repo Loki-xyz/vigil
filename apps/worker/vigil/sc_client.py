@@ -270,15 +270,31 @@ class SCClient:
         soup = BeautifulSoup(html, "html.parser")
         table = soup.find("table")
         if not table:
-            logger.warning("No results table found in SC AJAX response")
+            logger.warning(
+                "No <table> tag found in HTML (len=%d, preview=%r)",
+                len(html),
+                html[:200],
+            )
             return []
 
         records: list[SCOrderRecord] = []
         tbody = table.find("tbody")
         rows = (tbody or table).find_all("tr")
+        logger.info(
+            "Table parser: found table, tbody=%s, rows=%d",
+            tbody is not None,
+            len(rows),
+        )
 
-        for row in rows:
+        for row_idx, row in enumerate(rows):
             cells = row.find_all("td")
+            if row_idx < 3:
+                logger.info(
+                    "Row %d: %d cells, diary=%s",
+                    row_idx,
+                    len(cells),
+                    row.get("data-diary-no", "N/A"),
+                )
             if len(cells) < 4:
                 continue
 
@@ -324,6 +340,14 @@ class SCClient:
                             order_date=order_date,
                             pdf_url=pdf_url,
                         )
+                    )
+                elif row_idx < 3:
+                    logger.info(
+                        "Row %d skipped: case=%r, pdf=%r, cells=%d",
+                        row_idx,
+                        case_number[:30] if case_number else "",
+                        pdf_url[:30] if pdf_url else "",
+                        len(cells),
                     )
             except Exception:
                 logger.warning("Failed to parse SC order row", exc_info=True)
@@ -447,6 +471,7 @@ class SCClient:
 
                 # Step 6: Extract HTML from JSON wrapper and parse results
                 html_to_parse = resp.text
+                json_extracted = False
                 try:
                     ajax_data = json.loads(resp.text)
                     if isinstance(ajax_data, dict) and isinstance(
@@ -455,18 +480,31 @@ class SCClient:
                         html_to_parse = ajax_data["data"].get(
                             "resultsHtml", resp.text
                         )
-                except (json.JSONDecodeError, ValueError):
-                    pass  # Not JSON — use raw response text as-is
+                        json_extracted = True
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    logger.info(
+                        "JSON extraction skipped: %s", exc
+                    )
+
+                logger.info(
+                    "Parsing response: json_extracted=%s, "
+                    "html_len=%d, resp_len=%d, starts_with=%r",
+                    json_extracted,
+                    len(html_to_parse),
+                    len(resp.text),
+                    html_to_parse[:100],
+                )
 
                 records = self._parse_results_table(html_to_parse)
 
                 if not records:
                     logger.warning(
                         "AJAX response contained no results table. "
-                        "Response length=%d, content-type=%s, preview:\n%s",
-                        len(resp.text),
+                        "Response length=%d, content-type=%s, "
+                        "html_to_parse preview:\n%s",
+                        len(html_to_parse),
                         resp.headers.get("content-type", "unknown"),
-                        resp.text[:2000],
+                        html_to_parse[:2000],
                     )
 
                 await self._log_call(

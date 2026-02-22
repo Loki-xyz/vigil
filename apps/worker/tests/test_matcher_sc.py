@@ -69,9 +69,9 @@ class TestProcessScOrders:
         assert len(new_matches) == 1
         assert new_matches[0]["judgment_id"] == "j1"
 
-        # Verify upsert was called with correct data
-        upsert_call = patch_supabase.table.return_value.upsert.call_args
-        judgment_data = upsert_call[0][0]
+        # First upsert is for judgments, second is for watch_matches
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        judgment_data = upsert_calls[0][0][0]
         assert judgment_data["source"] == "sc_website"
         assert judgment_data["sc_case_number"] == "SLP(C) No. 12345/2025"
         assert judgment_data["ik_doc_id"] is None
@@ -123,8 +123,9 @@ class TestProcessScOrders:
 
         await process_sc_orders("w1", [(order, match_result, long_text)])
 
-        upsert_call = patch_supabase.table.return_value.upsert.call_args
-        judgment_data = upsert_call[0][0]
+        # First upsert is for judgments
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        judgment_data = upsert_calls[0][0][0]
         assert len(judgment_data["full_text"]) == 100_000
 
     async def test_snippet_capped_at_500_chars(self, patch_supabase):
@@ -139,8 +140,9 @@ class TestProcessScOrders:
 
         await process_sc_orders("w1", [(order, match_result, "")])
 
-        insert_call = patch_supabase.table.return_value.insert.call_args
-        match_data = insert_call[0][0]
+        # Second upsert is for watch_matches
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        match_data = upsert_calls[1][0][0]
         assert len(match_data["snippet"]) == 500
 
     async def test_judgment_date_mapped_correctly(self, patch_supabase):
@@ -154,7 +156,8 @@ class TestProcessScOrders:
 
         await process_sc_orders("w1", [(order, match_result, "")])
 
-        upsert_call = patch_supabase.table.return_value.upsert.call_args
-        judgment_data = upsert_call[0][0]
+        # First upsert is for judgments
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        judgment_data = upsert_calls[0][0][0]
         assert judgment_data["judgment_date"] == "2026-02-21"
         assert judgment_data["court"] == "Supreme Court of India"

@@ -128,8 +128,9 @@ class TestNewJudgmentAndMatch:
 
         await process_search_results("w-1", docs)
 
-        upsert_call = patch_supabase.table.return_value.upsert.call_args
-        inserted = upsert_call[0][0]
+        # First upsert call is for judgments, second is for watch_matches
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        inserted = upsert_calls[0][0][0]
         assert inserted["ik_doc_id"] == doc["tid"]
         assert inserted["title"] == doc["title"]
         assert inserted["court"] == doc["docsource"]
@@ -150,8 +151,9 @@ class TestNewJudgmentAndMatch:
 
         await process_search_results("w-1", docs)
 
-        insert_call = patch_supabase.table.return_value.insert.call_args
-        match_data = insert_call[0][0]
+        # Second upsert call is for watch_matches
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        match_data = upsert_calls[1][0][0]
         assert match_data["watch_id"] == "w-1"
         assert match_data["is_notified"] is False
         assert match_data["snippet"] == docs[0]["headline"]
@@ -309,8 +311,9 @@ class TestErrorHandling:
 
         await process_search_results("w-1", docs)
 
-        upsert_call = patch_supabase.table.return_value.upsert.call_args
-        data = upsert_call[0][0]
+        # First upsert call is for judgments
+        upsert_calls = patch_supabase.table.return_value.upsert.call_args_list
+        data = upsert_calls[0][0][0]
         assert data["headline"] is None
         assert data["doc_size"] is None
 

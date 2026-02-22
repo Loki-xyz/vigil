@@ -123,7 +123,7 @@ async def process_search_results(
             try:
                 match_resp = (
                     supabase.table("watch_matches")
-                    .insert(match_data)
+                    .upsert(match_data, on_conflict="watch_id,judgment_id")
                     .execute()
                 )
             except Exception:
@@ -235,7 +235,7 @@ async def process_sc_orders(
             try:
                 match_resp = (
                     supabase.table("watch_matches")
-                    .insert(match_data)
+                    .upsert(match_data, on_conflict="watch_id,judgment_id")
                     .execute()
                 )
             except Exception:

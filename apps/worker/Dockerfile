@@ -2,11 +2,6 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for SC captcha OCR and PDF extraction
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy dependency spec first for Docker layer caching
 COPY pyproject.toml .
 

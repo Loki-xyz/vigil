@@ -347,6 +347,20 @@ async def check_poll_requests() -> None:
                     watch["id"],
                     len(sc_matches),
                 )
+                # Update watch stats (poll_single_watch does this for IK)
+                try:
+                    supabase.table("watches").update(
+                        {
+                            "last_polled_at": datetime.now(timezone.utc).isoformat(),
+                            "last_poll_result_count": len(sc_matches),
+                        }
+                    ).eq("id", watch["id"]).execute()
+                except Exception:
+                    logger.error(
+                        "Failed to update last_polled_at for watch %s",
+                        watch.get("id"),
+                        exc_info=True,
+                    )
             else:
                 await poll_single_watch(watch)
 

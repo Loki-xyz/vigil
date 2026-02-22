@@ -445,8 +445,20 @@ class SCClient:
                     )
                     continue
 
-                # Step 6: Parse results
-                records = self._parse_results_table(resp.text)
+                # Step 6: Extract HTML from JSON wrapper and parse results
+                html_to_parse = resp.text
+                try:
+                    ajax_data = json.loads(resp.text)
+                    if isinstance(ajax_data, dict) and isinstance(
+                        ajax_data.get("data"), dict
+                    ):
+                        html_to_parse = ajax_data["data"].get(
+                            "resultsHtml", resp.text
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass  # Not JSON — use raw response text as-is
+
+                records = self._parse_results_table(html_to_parse)
 
                 if not records:
                     logger.warning(

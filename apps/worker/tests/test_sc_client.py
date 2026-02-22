@@ -392,6 +392,166 @@ class TestFetchDailyOrders:
         assert orders[0].case_number == "SLP(C) 12345/2025"
         assert orders[0].diary_number == "132-2026"
 
+    async def test_successful_fetch_json_wrapped(self, patch_supabase, test_settings):
+        """Real SC website wraps HTML in JSON: {"success":true,"data":{"resultsHtml":"..."}}"""
+        client = SCClient(
+            base_url="https://test.sci.gov.in",
+            timeout=5,
+            rate_limit_seconds=0,
+            captcha_max_attempts=1,
+        )
+
+        captcha_page_html = (
+            "<html><body>"
+            '<img src="https://test.sci.gov.in/?_siwp_captcha&id=abc123">'
+            '<input type="hidden" name="action" value="get_rop_data">'
+            "</body></html>"
+        )
+        results_html = _make_results_html(
+            [
+                (
+                    "1",
+                    "200-2026",
+                    "WP(C) 999/2026",
+                    "A vs B",
+                    "ADV2",
+                    "https://api.sci.gov.in/pdf/order2.pdf|22-02-2026",
+                ),
+            ]
+        )
+        # Wrap HTML in JSON like the real SC website does
+        import json
+
+        json_response = json.dumps(
+            {
+                "success": True,
+                "data": {"pagination": False, "resultsHtml": results_html},
+            }
+        )
+
+        captcha_image = _make_captcha_image_bytes()
+
+        get_responses = [
+            httpx.Response(
+                200,
+                text=captcha_page_html,
+                request=httpx.Request(
+                    "GET", "https://test.sci.gov.in/daily-order-rop-date/"
+                ),
+            ),
+            httpx.Response(
+                200,
+                content=captcha_image,
+                request=httpx.Request(
+                    "GET", "https://test.sci.gov.in/?_siwp_captcha&id=abc123"
+                ),
+            ),
+        ]
+        post_response = httpx.Response(
+            200,
+            text=json_response,
+            request=httpx.Request(
+                "POST", "https://test.sci.gov.in/wp-admin/admin-ajax.php"
+            ),
+        )
+
+        with (
+            patch.object(client, "_rate_limit", new_callable=AsyncMock),
+            patch.object(
+                client._client, "get", new_callable=AsyncMock, side_effect=get_responses
+            ),
+            patch.object(
+                client._client,
+                "post",
+                new_callable=AsyncMock,
+                return_value=post_response,
+            ),
+            patch.object(
+                client, "_solve_math_captcha", new_callable=AsyncMock, return_value=5
+            ),
+        ):
+            orders = await client.fetch_daily_orders(
+                date(2026, 2, 20), date(2026, 2, 22)
+            )
+
+        assert len(orders) == 1
+        assert orders[0].case_number == "WP(C) 999/2026"
+        assert orders[0].diary_number == "200-2026"
+
+    async def test_json_no_results(self, patch_supabase, test_settings):
+        """JSON response with no results table should return empty list, not crash."""
+        client = SCClient(
+            base_url="https://test.sci.gov.in",
+            timeout=5,
+            rate_limit_seconds=0,
+            captcha_max_attempts=1,
+        )
+
+        captcha_page_html = (
+            "<html><body>"
+            '<img src="https://test.sci.gov.in/?_siwp_captcha&id=abc123">'
+            '<input type="hidden" name="action" value="get_rop_data">'
+            "</body></html>"
+        )
+        import json
+
+        json_response = json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "pagination": False,
+                    "resultsHtml": '<div class="text-center mr-top15">No records found</div>',
+                },
+            }
+        )
+
+        captcha_image = _make_captcha_image_bytes()
+
+        get_responses = [
+            httpx.Response(
+                200,
+                text=captcha_page_html,
+                request=httpx.Request(
+                    "GET", "https://test.sci.gov.in/daily-order-rop-date/"
+                ),
+            ),
+            httpx.Response(
+                200,
+                content=captcha_image,
+                request=httpx.Request(
+                    "GET", "https://test.sci.gov.in/?_siwp_captcha&id=abc123"
+                ),
+            ),
+        ]
+        post_response = httpx.Response(
+            200,
+            text=json_response,
+            request=httpx.Request(
+                "POST", "https://test.sci.gov.in/wp-admin/admin-ajax.php"
+            ),
+        )
+
+        with (
+            patch.object(client, "_rate_limit", new_callable=AsyncMock),
+            patch.object(
+                client._client, "get", new_callable=AsyncMock, side_effect=get_responses
+            ),
+            patch.object(
+                client._client,
+                "post",
+                new_callable=AsyncMock,
+                return_value=post_response,
+            ),
+            patch.object(
+                client, "_solve_math_captcha", new_callable=AsyncMock, return_value=3
+            ),
+        ):
+            orders = await client.fetch_daily_orders(
+                date(2026, 2, 20), date(2026, 2, 22)
+            )
+
+        assert len(orders) == 0
+
     async def test_captcha_retry_on_failure(self, patch_supabase, test_settings):
         client = SCClient(
             base_url="https://test.sci.gov.in",

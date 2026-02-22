@@ -246,6 +246,35 @@ class TestParseResultsTable:
         assert records[1].case_number == "WP(C) 222/2025"
         assert records[1].diary_number == "200-2026"
 
+    def test_malformed_td_missing_closing_bracket(self):
+        """Real SC website has <td class="respondents"\\n<div> (missing >)."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        # Build HTML matching the actual SC website malformed pattern
+        rows_html = ""
+        for i in range(1, 51):  # 50 rows to trigger the parser bug at scale
+            rows_html += f'''<tr data-diary-no="{i}-2026">
+<td>{i}</td>
+<td>{i}-2026</td>
+<td>SLP(C) No.-{i:06d} - 2026</td>
+<td class="petitioners">
+    <div>PARTY A {i}</div><div>VS<br>PARTY B {i}</div></td>
+<td class="respondents"
+                    <div>ADV {i}</div><div><br></div></td>
+<td></td>
+<td></td>
+<td>
+    <a target="_blank" href="https://api.sci.gov.in/order_{i}.pdf">20-02-2026</a><br/></td>
+</tr>'''
+        html = f"""<table><thead><tr>
+<th>SN</th><th>DN</th><th>CN</th><th>P/R</th>
+<th>Adv</th><th>B</th><th>JB</th><th>ROP</th>
+</tr></thead><tbody>{rows_html}</tbody></table>"""
+        records = client._parse_results_table(html)
+        assert len(records) == 50
+        assert records[0].case_number == "SLP(C) No.-000001 - 2026"
+        assert records[0].pdf_url == "https://api.sci.gov.in/order_1.pdf"
+        assert records[49].diary_number == "50-2026"
+
     def test_no_table_returns_empty(self):
         client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
         records = client._parse_results_table("<div>No results found</div>")

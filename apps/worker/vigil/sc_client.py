@@ -267,6 +267,10 @@ class SCClient:
         Each <tr> has a data-diary-no attribute.
         PDF URLs are absolute (api.sci.gov.in domain).
         """
+        # Fix malformed <td> tags from SC website: <td class="respondents"\n  <div>
+        # should be <td class="respondents">\n  <div>  (missing closing >)
+        html = re.sub(r"(<td\b[^>]*\")\s*\n(\s*<)", r"\1>\n\2", html)
+
         soup = BeautifulSoup(html, "html.parser")
         table = soup.find("table")
         if not table:

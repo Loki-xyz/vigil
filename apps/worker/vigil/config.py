@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     sc_captcha_max_attempts: int = 5
     sc_rate_limit_seconds: float = 3.0
     sc_lookback_days: int = 4
-    sc_pdf_download_enabled: bool = True
+    sc_pdf_download_enabled: bool = False
     # Captcha solver
     sc_captcha_solver: str = "llm"  # "llm" | "local"
     sc_captcha_llm_api_key: str = ""

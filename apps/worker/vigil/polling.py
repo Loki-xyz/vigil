@@ -598,16 +598,16 @@ async def sc_scrape_for_watch(watch: dict) -> list[dict]:
     Does NOT call dispatch_pending_notifications (the 10-min job handles that).
 
     Returns list of newly created watch_match dicts. Returns [] on any error.
-    Enforces a 3-minute overall timeout to prevent hanging.
+    Enforces a 10-minute overall timeout to prevent hanging.
     """
     try:
         return await asyncio.wait_for(
             _sc_scrape_for_watch_inner(watch),
-            timeout=180.0,
+            timeout=600.0,
         )
     except asyncio.TimeoutError:
         logger.error(
-            "SC scrape for Poll Now watch %s timed out after 180s",
+            "SC scrape for Poll Now watch %s timed out after 600s",
             watch.get("id"),
         )
         return []

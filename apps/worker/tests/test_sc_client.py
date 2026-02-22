@@ -168,6 +168,28 @@ class TestCaptchaRejection:
         )
         assert client._is_captcha_rejection(html) is False
 
+    def test_detects_json_success_false(self):
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        resp = '{"success":false,"data":"{\\"message\\":\\"The captcha code entered was incorrect\\"}"}'
+        assert client._is_captcha_rejection(resp) is True
+
+    def test_accepts_json_success_true_no_results(self):
+        """Regression: success:true with pagination:false must NOT be treated as rejection."""
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        resp = (
+            '{"success":true,"data":{"pagination":false,"resultsHtml":'
+            '"<div class=\\"text-center mr-top15\\">No records found</div>"}}'
+        )
+        assert client._is_captcha_rejection(resp) is False
+
+    def test_accepts_json_success_true_with_results(self):
+        client = SCClient(base_url="https://test.sci.gov.in", timeout=5)
+        resp = (
+            '{"success":true,"data":{"pagination":true,"resultsHtml":'
+            '"<table><tr><td>Case 1</td></tr></table>"}}'
+        )
+        assert client._is_captcha_rejection(resp) is False
+
 
 # ── HTML Table Parsing ───────────────────────────────────
 

@@ -17,6 +17,7 @@ DESIGN PRINCIPLES (mirroring ik_client.py):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -207,14 +208,26 @@ class SCClient:
         """Detect if the AJAX response indicates a wrong captcha answer.
 
         The SCI AJAX endpoint may return either:
-          - Plain HTML with error text
+          - JSON like {"success":true,"data":{"pagination":false,"resultsHtml":"..."}}
           - JSON like {"success":false,"data":"{\\"message\\":\\"The captcha code ...\\"}"}
+          - Plain HTML with error text
         """
-        text_lower = response_text.lower().strip()
+        # Try JSON parsing first (primary SCI response format)
+        try:
+            data = json.loads(response_text)
+            if isinstance(data, dict):
+                # success:false means captcha was rejected
+                if data.get("success") is False:
+                    return True
+                # success:true means captcha was accepted — NOT a rejection,
+                # even if resultsHtml contains no <table> (valid "no results")
+                if data.get("success") is True:
+                    return False
+        except (json.JSONDecodeError, ValueError):
+            pass
 
-        # Check for JSON {"success":false,...} pattern (primary SCI format)
-        if '"success"' in text_lower and "false" in text_lower:
-            return True
+        # Fallback: check plain-text patterns for non-JSON responses
+        text_lower = response_text.lower().strip()
 
         rejection_patterns = [
             "incorrect captcha",

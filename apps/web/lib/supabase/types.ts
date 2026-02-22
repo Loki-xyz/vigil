@@ -44,6 +44,7 @@ export interface WatchMatch {
   snippet: string | null
   is_notified: boolean
   notified_at: string | null
+  retry_count: number
   // Joined relations (optional)
   watches?: Watch
   judgments?: Judgment

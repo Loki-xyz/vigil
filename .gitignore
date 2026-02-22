@@ -38,6 +38,9 @@ supabase/.branches/
 .pytest_cache/
 .ruff_cache/
 
+# Captcha debug output
+captcha_debug/
+
 # Bun
 bun.lockb
 

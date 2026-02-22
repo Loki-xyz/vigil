@@ -81,6 +81,50 @@ _watch_backoffs: dict[str, datetime] = {}
 _sc_consecutive_failures: int = 0
 _SC_MAX_CONSECUTIVE_FAILURES = 3
 
+# Circuit breaker for Supabase — prevents hammering a down DB.
+_supabase_consecutive_failures: int = 0
+_supabase_backoff_until: datetime | None = None
+_SUPABASE_MAX_FAILURES_BEFORE_BACKOFF = 3
+_SUPABASE_MAX_BACKOFF_MINUTES = 30
+
+
+def _supabase_failure() -> None:
+    """Record a Supabase failure and set exponential backoff if threshold hit."""
+    global _supabase_consecutive_failures, _supabase_backoff_until
+    _supabase_consecutive_failures += 1
+    if _supabase_consecutive_failures >= _SUPABASE_MAX_FAILURES_BEFORE_BACKOFF:
+        backoff_min = min(
+            2 ** (_supabase_consecutive_failures - _SUPABASE_MAX_FAILURES_BEFORE_BACKOFF),
+            _SUPABASE_MAX_BACKOFF_MINUTES,
+        )
+        _supabase_backoff_until = datetime.now(timezone.utc) + timedelta(minutes=backoff_min)
+        logger.warning(
+            "Supabase circuit breaker: %d consecutive failures. "
+            "Backing off for %d min (until %s).",
+            _supabase_consecutive_failures,
+            backoff_min,
+            _supabase_backoff_until.isoformat(),
+        )
+
+
+def _supabase_success() -> None:
+    """Reset the Supabase circuit breaker on a successful operation."""
+    global _supabase_consecutive_failures, _supabase_backoff_until
+    if _supabase_consecutive_failures > 0:
+        logger.info("Supabase circuit breaker reset after successful operation.")
+    _supabase_consecutive_failures = 0
+    _supabase_backoff_until = None
+
+
+def _supabase_is_available() -> bool:
+    """Check if we're past the Supabase backoff window."""
+    if _supabase_backoff_until is None:
+        return True
+    if datetime.now(timezone.utc) >= _supabase_backoff_until:
+        logger.info("Supabase backoff expired. Retrying.")
+        return True
+    return False
+
 
 def _get_ik_client() -> IKClient:
     """Lazy-init the shared IK API client."""
@@ -196,10 +240,16 @@ async def poll_cycle() -> None:
         logger.info("Polling disabled (VIGIL_POLLING_ENABLED=false). Skipping cycle.")
         return
 
+    if not _supabase_is_available():
+        logger.info("Supabase circuit breaker active. Skipping poll cycle.")
+        return
+
     try:
         resp = supabase.table("watches").select("*").eq("is_active", True).execute()
         watches = resp.data or []
+        _supabase_success()
     except Exception:
+        _supabase_failure()
         logger.error(
             "Failed to fetch watches from Supabase. Will retry next cycle.",
             exc_info=True,
@@ -240,6 +290,9 @@ async def poll_cycle() -> None:
 
 async def check_poll_requests() -> None:
     """Check poll_requests table for pending 'Poll Now' requests."""
+    if not _supabase_is_available():
+        return
+
     # Clean up stale "processing" requests (worker crashed or hung)
     try:
         stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
@@ -258,8 +311,14 @@ async def check_poll_requests() -> None:
     except Exception:
         logger.error("Failed to clean up stale poll requests", exc_info=True)
 
-    resp = supabase.table("poll_requests").select("*").eq("status", "pending").execute()
-    requests = resp.data or []
+    try:
+        resp = supabase.table("poll_requests").select("*").eq("status", "pending").execute()
+        requests = resp.data or []
+        _supabase_success()
+    except Exception:
+        _supabase_failure()
+        logger.error("Failed to fetch poll requests from Supabase", exc_info=True)
+        return
 
     for req in requests:
         try:
@@ -450,8 +509,6 @@ async def sc_scrape_cycle() -> None:
         _sc_consecutive_failures += 1
         logger.error("Unexpected error in SC scrape cycle", exc_info=True)
     finally:
-        # Free EasyOCR reader (~250MB) until next scheduled scrape
-        SCClient.unload_easyocr()
         gc.collect()
         _log_memory_usage("after_sc_scrape_cycle")
 
@@ -569,8 +626,6 @@ async def sc_scrape_for_watch(watch: dict) -> list[dict]:
         )
         return []
     finally:
-        # Free EasyOCR reader after ad-hoc scrape too
-        SCClient.unload_easyocr()
         gc.collect()
 
 

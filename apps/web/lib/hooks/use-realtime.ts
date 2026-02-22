@@ -20,7 +20,11 @@ export function useRealtimeMatches(onNewMatch: (match: WatchMatch) => void) {
           onNewMatch(payload.new as WatchMatch)
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === "CHANNEL_ERROR") {
+          console.error("Realtime watch_matches subscription error:", err)
+        }
+      })
 
     return () => {
       supabase.removeChannel(channel)
@@ -39,7 +43,11 @@ export function useRealtimeWatches(onUpdate: () => void) {
           onUpdate()
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === "CHANNEL_ERROR") {
+          console.error("Realtime watches subscription error:", err)
+        }
+      })
 
     return () => {
       supabase.removeChannel(channel)

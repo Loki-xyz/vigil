@@ -276,13 +276,15 @@ def test_settings():
         mock_settings.sc_rate_limit_seconds = 0.01
         mock_settings.sc_lookback_days = 2
         mock_settings.sc_pdf_download_enabled = True
-        mock_settings.sc_captcha_debug_dir = ""
-        mock_settings.tesseract_cmd = "tesseract"
+        mock_settings.sc_captcha_solver = "llm"
+        mock_settings.sc_captcha_llm_api_key = "test-anthropic-key"
+        mock_settings.sc_captcha_llm_model = "claude-haiku-4-5-20251001"
         # Patch settings in modules that import it directly
         with (
             patch("vigil.notifier.settings", mock_settings, create=True),
             patch("vigil.polling.settings", mock_settings, create=True),
             patch("vigil.sc_client.settings", mock_settings, create=True),
+            patch("vigil.captcha_solver.settings", mock_settings, create=True),
         ):
             yield mock_settings
 

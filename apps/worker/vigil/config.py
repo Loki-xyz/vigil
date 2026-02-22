@@ -45,9 +45,10 @@ class Settings(BaseSettings):
     sc_rate_limit_seconds: float = 3.0
     sc_lookback_days: int = 2
     sc_pdf_download_enabled: bool = True
-    sc_captcha_debug_dir: str = ""
-    sc_captcha_ocr_timeout: float = 10.0
-    tesseract_cmd: str = "tesseract"
+    # Captcha solver
+    sc_captcha_solver: str = "llm"  # "llm" | "local"
+    sc_captcha_llm_api_key: str = ""
+    sc_captcha_llm_model: str = "claude-haiku-4-5-20251001"
 
     # App
     timezone: str = "Asia/Kolkata"

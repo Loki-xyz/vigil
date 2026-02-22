@@ -120,11 +120,22 @@ async def process_search_results(
                 "snippet": doc.get("headline"),
             }
 
-            match_resp = (
-                supabase.table("watch_matches")
-                .insert(match_data)
-                .execute()
-            )
+            try:
+                match_resp = (
+                    supabase.table("watch_matches")
+                    .insert(match_data)
+                    .execute()
+                )
+            except Exception:
+                logger.error(
+                    "Failed to insert watch_match for judgment %s (doc %s, watch %s) "
+                    "— judgment was upserted but match link is missing",
+                    judgment_id,
+                    doc.get("tid"),
+                    watch_id,
+                    exc_info=True,
+                )
+                continue
 
             if match_resp.data:
                 new_matches.extend(match_resp.data)
@@ -199,12 +210,11 @@ async def process_sc_orders(
         try:
             judgment_data = _map_sc_order_to_judgment(order, full_text)
 
-            # Upsert judgment — the partial unique index on
-            # (sc_case_number, judgment_date) WHERE source='sc_website'
-            # handles dedup. We use a regular insert with conflict handling.
+            # Upsert judgment — the UNIQUE constraint on
+            # (sc_case_number, judgment_date, source) handles dedup.
             upsert_resp = (
                 supabase.table("judgments")
-                .upsert(judgment_data, on_conflict="sc_case_number,judgment_date")
+                .upsert(judgment_data, on_conflict="sc_case_number,judgment_date,source")
                 .execute()
             )
 
@@ -222,11 +232,22 @@ async def process_sc_orders(
                 "relevance_score": match_result.relevance_score,
             }
 
-            match_resp = (
-                supabase.table("watch_matches")
-                .insert(match_data)
-                .execute()
-            )
+            try:
+                match_resp = (
+                    supabase.table("watch_matches")
+                    .insert(match_data)
+                    .execute()
+                )
+            except Exception:
+                logger.error(
+                    "Failed to insert watch_match for SC judgment %s (case %s, watch %s) "
+                    "— judgment was upserted but match link is missing",
+                    judgment_id,
+                    getattr(order, "case_number", "unknown"),
+                    watch_id,
+                    exc_info=True,
+                )
+                continue
 
             if match_resp.data:
                 new_matches.extend(match_resp.data)
